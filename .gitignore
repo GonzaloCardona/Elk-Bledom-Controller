@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and temporary files
+*.cache
+*.tmp
+
+# PyInstaller & builds
+# No incluir artefactos generados ni ejecutables binarios en el repo de git
+build/
+dist/
+*.spec.bak
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Windows system files
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log

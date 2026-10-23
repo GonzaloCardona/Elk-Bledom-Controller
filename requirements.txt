@@ -1,0 +1,6 @@
+bleak>=0.21.0
+pyaudiowpatch>=0.2.12.5
+numpy>=1.24.0
+mss>=9.0.0
+pystray>=0.19.4
+pillow>=10.0.0
