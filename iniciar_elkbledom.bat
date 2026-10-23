@@ -19,7 +19,7 @@ if errorlevel 1 (
 )
 
 :: Comprobar e instalar dependencias si faltan
-python -c "import bleak, pyaudiowpatch, numpy, mss, pystray, PIL" >nul 2>&1
+python -c "import bleak, pyaudiowpatch, numpy, mss, pystray, PIL, winrt.windows.media.control, winrt.windows.storage.streams" >nul 2>&1
 if errorlevel 1 (
     echo  Instalando dependencias desde requirements.txt...
     pip install -r requirements.txt --quiet

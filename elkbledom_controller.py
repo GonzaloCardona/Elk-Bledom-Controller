@@ -21,7 +21,7 @@ Protocolo ELK-BLEDOM (9 bytes):
   Efecto   :  7e 00 03 EE 03 00 00 00 ef
 """
 
-import asyncio, threading, time, colorsys, math, json, os, sys
+import asyncio, threading, time, colorsys, math, json, os, sys, io
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -34,10 +34,17 @@ except ImportError:
 
 try:
     import pystray
-    from PIL import Image as PILImage, ImageDraw
+    from PIL import Image as PILImage, ImageDraw, ImageTk
     TRAY_OK = True
 except ImportError:
     TRAY_OK = False
+
+try:
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as SMTCManager
+    from winrt.windows.storage.streams import DataReader
+    MEDIA_OK = True
+except ImportError:
+    MEDIA_OK = False
 
 # numpy, mss y pyaudiowpatch se importan solo cuando se activa cada modo
 
@@ -342,6 +349,164 @@ class ScreenAnalyzer:
         except Exception as e:
             self.on_log(f"❌ Pantalla: {e}"); self._running=False
 
+# ── Analizador de Portada (Media / Álbum de Windows) ──────────────────────────
+
+class AlbumCoverAnalyzer:
+    """Extrae el color de la portada del reproductor activo de Windows (Spotify, YouTube, etc.)"""
+    def __init__(self, on_color, on_log, on_track=None, method="vibrant", sat_boost=1.8, bri_scale=0.85, pure_color=True):
+        self.on_color   = on_color
+        self.on_log     = on_log
+        self.on_track   = on_track
+        self.method     = method     # "vibrant" | "dominant"
+        self.sat_boost  = sat_boost  # 1.0 - 2.5 (aumenta saturación para que los LEDs no se vean blancos)
+        self.bri_scale  = bri_scale  # 0.4 - 1.0 (ajusta el brillo para no deslumbrar ni blanquear)
+        self.pure_color = pure_color # forzar saturación mínima en colores cromáticos
+        self._running   = False
+        self._paused    = False
+        self._thread    = None
+        self._last_id   = None
+        self._cur_rgb   = None
+        self._last_raw  = None
+
+    def start(self):
+        if not MEDIA_OK:
+            self.on_log("❌ winrt-Windows.Media.Control no disponible"); return False
+        self._running = True; self._paused = False
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self):
+        self._running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def pause(self): self._paused = True
+    def resume(self): self._paused = False
+
+    def set_method(self, m):
+        self.method = m
+        self._last_id = None  # forzar re-análisis inmediato
+
+    def update_params(self, sat_boost=None, bri_scale=None, pure_color=None):
+        if sat_boost is not None: self.sat_boost = float(sat_boost)
+        if bri_scale is not None: self.bri_scale = float(bri_scale)
+        if pure_color is not None: self.pure_color = bool(pure_color)
+        if self._last_raw is not None:
+            rgb = self._boost_led_color(*self._last_raw)
+            self._cur_rgb = rgb
+            self.on_color(rgb[0], rgb[1], rgb[2])
+            if self.on_track and self._last_id:
+                self.on_track(self._last_id, rgb, None)
+
+    def _run_loop(self):
+        self.on_log("💿 Modo Portada: iniciado (escuchando reproductor de Windows)")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while self._running:
+                if self._paused:
+                    time.sleep(0.5); continue
+                try:
+                    loop.run_until_complete(self._check_media())
+                except Exception:
+                    pass
+                for _ in range(10):
+                    if not self._running or self._paused: break
+                    time.sleep(0.1)
+        finally:
+            loop.close()
+
+    async def _check_media(self):
+        mgr = await SMTCManager.request_async()
+        sess = mgr.get_current_session()
+        if not sess:
+            return
+        props = await sess.try_get_media_properties_async()
+        title = props.title or ""
+        artist = props.artist or ""
+        track_id = f"{title} - {artist}".strip(" -")
+        if not track_id:
+            return
+
+        if track_id == self._last_id and self._cur_rgb is not None:
+            return
+
+        thumb = props.thumbnail
+        if not thumb:
+            self._last_id = track_id
+            self.on_log(f"🎵 {track_id} (sin carátula)")
+            if self.on_track:
+                self.on_track(track_id, (180, 180, 180), None)
+            return
+
+        stream = await thumb.open_read_async()
+        size = stream.size
+        if size <= 0: return
+        reader = DataReader(stream.get_input_stream_at(0))
+        await reader.load_async(size)
+        buf = bytearray(size)
+        reader.read_bytes(buf)
+        img = PILImage.open(io.BytesIO(buf)).convert("RGB")
+
+        raw_rgb = self._extract_raw_color(img, self.method)
+        self._last_raw = raw_rgb
+        rgb = self._boost_led_color(*raw_rgb)
+        self._last_id = track_id
+        self._cur_rgb = rgb
+
+        self.on_log(f"🎵 {track_id} → Color LED RGB{rgb}")
+        self.on_color(rgb[0], rgb[1], rgb[2])
+        if self.on_track:
+            self.on_track(track_id, rgb, img)
+
+    def _boost_led_color(self, r, g, b):
+        """Calibra el color para tiras LED RGB físicas evitando el blanqueado."""
+        h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+        # Si tiene matiz cromático perceptible
+        if s > 0.06:
+            if self.pure_color:
+                # Elevar saturación mínima para apagar los diodos secundarios que blanquean
+                s = min(1.0, max(0.70, s * self.sat_boost))
+            else:
+                s = min(1.0, s * self.sat_boost)
+        # Ajustar brillo para que no queme los fósforos y deslave el color
+        v = min(1.0, v * self.bri_scale)
+        fr, fg, fb = colorsys.hsv_to_rgb(h, s, v)
+        return int(fr * 255), int(fg * 255), int(fb * 255)
+
+    def _extract_raw_color(self, img, method):
+        small = img.resize((48, 48), PILImage.Resampling.LANCZOS)
+        quantized = small.quantize(colors=16, method=PILImage.Quantize.FASTOCTREE).convert("RGB")
+        palette = quantized.getcolors(maxcolors=256) or []
+        if not palette: return (200, 200, 200)
+
+        if method == "dominant":
+            # Color con más píxeles (descartando casi negros totales)
+            valid = [c for c in palette if max(c[1]) > 25]
+            if not valid: valid = palette
+            return max(valid, key=lambda x: x[0])[1]
+
+        # Método vibrante (estilo Wallpaper Engine / Spotify)
+        vibrant = []
+        fallback = []
+        for count, (r, g, b) in palette:
+            h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+            if v < 0.12: continue
+            if s > 0.15:
+                # Ponderación: saturación^1.4 x brillo^0.5
+                score = count * (s ** 1.4) * (v ** 0.5)
+                vibrant.append((score, (r, g, b)))
+            else:
+                score = count * (v ** 0.8)
+                fallback.append((score, (r, g, b)))
+
+        if vibrant:
+            return max(vibrant, key=lambda x: x[0])[1]
+        elif fallback:
+            return max(fallback, key=lambda x: x[0])[1]
+        return (200, 200, 200)
+
 # ── Icono bandeja ─────────────────────────────────────────────────────────────
 
 def _make_icon(size=64):
@@ -360,7 +525,7 @@ BG=DARK="#0f0f14"; PANEL="#1a1a24"; CARD="#22222e"
 ACCENT="#7c6af7"; ACCENT2="#f76a8b"
 TXT="#e8e8f0"; DIM="#6a6a80"
 OK="#4ade80"; WARN="#facc15"; ERR="#f87171"
-MUSIC="#f76af0"; AMBIL="#38bdf8"
+MUSIC="#f76af0"; AMBIL="#38bdf8"; MEDIA="#ec4899"
 
 # ── Controlador principal (sin ventana Tk) ────────────────────────────────────
 # Separamos el estado de la app (AppState) de la UI (AppWindow).
@@ -438,6 +603,20 @@ class AppState:
             self._worker=w; self.active_mode="screen"; return True
         return False
 
+    def start_album(self, method="vibrant", sat_boost=1.8, bri_scale=0.85, pure_color=True):
+        self.stop_worker()
+        w=AlbumCoverAnalyzer(self._on_reactive_color, self._log, on_track=self._on_track_change,
+                             method=method, sat_boost=sat_boost, bri_scale=bri_scale, pure_color=pure_color)
+        if w.start():
+            self._worker=w; self.active_mode="album"; return True
+        return False
+
+    def _on_track_change(self, track_str, rgb, img):
+        if self.window:
+            try:
+                self.window.after(0, lambda: self.window.update_album_info(track_str, rgb, img))
+            except Exception: pass
+
     def set_background(self, is_bg: bool):
         """Pausar/reanudar workers según si estamos en segundo plano."""
         if self._worker:
@@ -492,6 +671,14 @@ class AppWindow(tk.Tk):
         self.monitor_var   = tk.StringVar()
         self.autostart_var = tk.BooleanVar(value=is_autostart())
         self.cur_color     = (255,100,50)
+        self._album_tk_img = None
+        self.album_sat_var   = tk.DoubleVar(value=1.8)
+        self.album_bri_var   = tk.IntVar(value=85)
+        self.album_pure_var  = tk.BooleanVar(value=True)
+        self._album_method_map = {
+            "🎨 Vibrante / Acento (Wallpaper Engine)": "vibrant",
+            "📊 Dominante (Color que más se repite)": "dominant"
+        }
 
         # Conectar callbacks del estado a esta ventana
         state._log_cb     = self._append_log
@@ -512,6 +699,8 @@ class AppWindow(tk.Tk):
             self.btn_music.config(text="⏹  Detener modo música", bg=ERR)
         elif state.active_mode == "screen":
             self.btn_screen.config(text="⏹  Detener modo pantalla", bg=ERR)
+        elif state.active_mode == "album":
+            self.btn_album.config(text="⏹  Detener modo portada", bg=ERR)
 
         # La ventana pasa a primer plano → reanudar workers
         state.set_background(False)
@@ -562,6 +751,7 @@ class AppWindow(tk.Tk):
         self._build_effects(self._fr)
         self._build_music(self._fr)
         self._build_screen(self._fr)
+        self._build_album(self._fr)
         self._build_settings(self._fr)
 
     # ── helpers ──────────────────────────────────────────────────────────
@@ -754,6 +944,56 @@ class AppWindow(tk.Tk):
         self.btn_screen=self._btn(inn,"🖥️  Activar modo pantalla",self._toggle_screen,AMBIL)
         self.btn_screen.pack(fill="x",ipady=6)
 
+    def _build_album(self,p):
+        inn=self._card(p,"💿  MODO PORTADA (Álbum / Reproductor)")
+        tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
+                 text="Sincroniza los LEDs con la carátula de lo que escuchas (Spotify, YouTube, etc.).\n"
+                      "Requiere:  pip install winrt-Windows.Media.Control"
+                 ).pack(anchor="w",pady=(0,6))
+        mr=tk.Frame(inn,bg=CARD); mr.pack(fill="x",pady=(0,6))
+        tk.Label(mr,text="Modo de color:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left",padx=(0,6))
+        self.album_method_cb=ttk.Combobox(mr,values=list(self._album_method_map.keys()),state="readonly",font=("Helvetica",8))
+        self.album_method_cb.current(0)
+        self.album_method_cb.pack(side="left",fill="x",expand=True)
+        self.album_method_cb.bind("<<ComboboxSelected>>",self._on_album_method_change)
+
+        # Calibración óptica para LEDs: evitar color deslavado/blanco y deslumbramiento
+        sr1=tk.Frame(inn,bg=CARD); sr1.pack(fill="x",pady=(4,2))
+        tk.Label(sr1,text="Saturación (Color vivo):",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
+        tk.Scale(sr1,from_=1.0,to=2.5,resolution=0.1,orient="horizontal",
+                 variable=self.album_sat_var,bg=CARD,fg=TXT,troughcolor=PANEL,
+                 activebackground=MEDIA,highlightthickness=0,bd=0,sliderlength=14,
+                 command=lambda v:self._on_album_param_change()
+                 ).pack(side="left",fill="x",expand=True,padx=6)
+        tk.Label(sr1,textvariable=self.album_sat_var,fg=DIM,bg=CARD,font=("Courier New",8),width=4).pack(side="right")
+
+        sr2=tk.Frame(inn,bg=CARD); sr2.pack(fill="x",pady=(0,4))
+        tk.Label(sr2,text="Brillo de carátula:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
+        tk.Scale(sr2,from_=30,to=100,resolution=5,orient="horizontal",
+                 variable=self.album_bri_var,bg=CARD,fg=TXT,troughcolor=PANEL,
+                 activebackground=MEDIA,highlightthickness=0,bd=0,sliderlength=14,
+                 command=lambda v:self._on_album_param_change()
+                 ).pack(side="left",fill="x",expand=True,padx=6)
+        tk.Label(sr2,textvariable=self.album_bri_var,fg=DIM,bg=CARD,font=("Courier New",8),width=4).pack(side="right")
+
+        prev_row=tk.Frame(inn,bg=CARD); prev_row.pack(fill="x",pady=(4,8))
+        self.album_thumb_canvas=tk.Canvas(prev_row,width=50,height=50,bg=PANEL,highlightthickness=0)
+        self.album_thumb_canvas.pack(side="left",padx=(0,8))
+
+        info_col=tk.Frame(prev_row,bg=CARD); info_col.pack(side="left",fill="both",expand=True)
+        self.lbl_album_track=tk.Label(info_col,text="Sin reproducción activa",fg=TXT,bg=CARD,
+                                      font=("Helvetica",9,"bold"),anchor="w",justify="left")
+        self.lbl_album_track.pack(fill="x")
+        self.lbl_album_rgb=tk.Label(info_col,text="Esperando música...",fg=DIM,bg=CARD,
+                                    font=("Courier New",8),anchor="w")
+        self.lbl_album_rgb.pack(fill="x")
+
+        self.album_color_preview=tk.Label(prev_row,text="       ",width=8,relief="flat",bg=CARD)
+        self.album_color_preview.pack(side="right",padx=6,ipady=12)
+
+        self.btn_album=self._btn(inn,"💿  Activar modo portada",self._toggle_album,MEDIA)
+        self.btn_album.pack(fill="x",ipady=6)
+
     def _build_settings(self,p):
         inn=self._card(p,"⚙️  AJUSTES")
         cf=tk.Frame(inn,bg=CARD); cf.pack(fill="x",pady=(0,8))
@@ -853,11 +1093,56 @@ class AppWindow(tk.Tk):
             self.btn_screen.config(text="⏹  Detener modo pantalla",bg=ERR)
             self.state._log("🖥️  Modo pantalla activo")
 
+    def _toggle_album(self):
+        if self.state.active_mode=="album":
+            self.state.stop_worker(); self._reset_mode_buttons()
+            self.state._log("⏹  Modo portada desactivado"); return
+        if not self.state.connected:
+            self.state._log("⚠️  Conecta primero un dispositivo LED"); return
+        self._reset_mode_buttons()
+        method_name=self.album_method_cb.get()
+        method=self._album_method_map.get(method_name,"vibrant")
+        sat=self.album_sat_var.get()
+        bri=self.album_bri_var.get()/100.0
+        pure=self.album_pure_var.get()
+        if self.state.start_album(method=method,sat_boost=sat,bri_scale=bri,pure_color=pure):
+            self.btn_album.config(text="⏹  Detener modo portada",bg=ERR)
+            self.state._log("💿 Modo portada activo")
+
+    def _on_album_param_change(self):
+        if isinstance(self.state._worker,AlbumCoverAnalyzer):
+            sat=self.album_sat_var.get()
+            bri=self.album_bri_var.get()/100.0
+            pure=self.album_pure_var.get()
+            self.state._worker.update_params(sat_boost=sat,bri_scale=bri,pure_color=pure)
+
+    def _on_album_method_change(self,e=None):
+        method_name=self.album_method_cb.get()
+        method=self._album_method_map.get(method_name,"vibrant")
+        if isinstance(self.state._worker,AlbumCoverAnalyzer):
+            self.state._worker.set_method(method)
+            self.state._log(f"💿 Método portada cambiado a: {method}")
+
+    def update_album_info(self,track_str,rgb,pil_img):
+        try:
+            self.lbl_album_track.config(text=track_str[:38]+("..." if len(track_str)>38 else ""))
+            self.lbl_album_rgb.config(text=f"Color RGB: ({rgb[0]}, {rgb[1]}, {rgb[2]})")
+            hex_c=f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+            self.album_color_preview.config(bg=hex_c)
+            if pil_img and ImageTk:
+                thumb=pil_img.resize((50,50),PILImage.Resampling.LANCZOS)
+                self._album_tk_img=ImageTk.PhotoImage(thumb)
+                self.album_thumb_canvas.delete("all")
+                self.album_thumb_canvas.create_image(25,25,image=self._album_tk_img)
+        except Exception: pass
+
     def _reset_mode_buttons(self):
         self.btn_music.config(text="🎵  Activar modo música",bg=MUSIC)
         self.btn_screen.config(text="🖥️  Activar modo pantalla",bg=AMBIL)
+        self.btn_album.config(text="💿  Activar modo portada",bg=MEDIA)
         self.lbl_music.config(text="")
         self.screen_preview.config(bg=CARD); self.lbl_screen_rgb.config(text="")
+        self.album_color_preview.config(bg=CARD)
 
     def _toggle_autostart(self):
         ok=set_autostart(self.autostart_var.get())
