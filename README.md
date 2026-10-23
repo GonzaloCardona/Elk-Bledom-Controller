@@ -2,6 +2,8 @@
 
 Aplicación de escritorio ligera y completa para Windows para controlar tiras LED con controlador **ELK-BLEDOM** (y compatibles) directamente desde el PC a través de Bluetooth BLE (Bluetooth Low Energy).
 
+> 📥 **[Descargar el ejecutable (.exe)](https://github.com/GonzaloCardona/Elk-Bledom-Controller/releases/latest)** — Listo para usar en Windows 10/11 sin necesidad de instalar Python.
+
 ---
 
 ## 🌟 Características
