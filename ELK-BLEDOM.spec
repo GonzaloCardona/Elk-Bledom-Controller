@@ -4,7 +4,7 @@ a = Analysis(
     ['elkbledom_controller.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('app_icon.png', '.'), ('app.ico', '.')],
     hiddenimports=[
         'bleak',
         'bleak.backends.winrt',
@@ -35,6 +35,7 @@ exe = EXE(
     a.datas,
     [],
     name='ELK-BLEDOM',
+    icon='app.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

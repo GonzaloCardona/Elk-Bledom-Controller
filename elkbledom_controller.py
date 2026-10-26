@@ -604,15 +604,29 @@ class AlbumCoverAnalyzer:
 
 # ── Icono bandeja ─────────────────────────────────────────────────────────────
 
+def _resource_path(filename):
+    """Resuelve la ruta de un recurso empaquetado por PyInstaller o en desarrollo."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, filename)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
 def _make_icon(size=64):
-    img=PILImage.new("RGBA",(size,size),(0,0,0,0))
-    d=ImageDraw.Draw(img)
-    d.ellipse([2,2,size-2,size-2],fill=(30,20,50,255))
-    d.ellipse([2,2,size-2,size-2],outline=(124,106,247,255),width=3)
-    cx=cy=size//2; r=size//5
-    d.ellipse([cx-r,cy-r,cx+r,cy+r],fill=(200,180,255,255))
-    d.ellipse([cx-r//2,cy-r//2,cx,cy],fill=(255,255,255,200))
-    return img
+    """Carga el icono PNG real de la app; si no existe, genera uno básico."""
+    try:
+        icon_path = _resource_path("app_icon.png")
+        img = PILImage.open(icon_path).convert("RGBA")
+        img = img.resize((size, size), PILImage.LANCZOS)
+        return img
+    except Exception:
+        # Fallback: icono generado proceduralmente
+        img = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse([2, 2, size-2, size-2], fill=(30, 20, 50, 255))
+        d.ellipse([2, 2, size-2, size-2], outline=(124, 106, 247, 255), width=3)
+        cx = cy = size // 2; r = size // 5
+        d.ellipse([cx-r, cy-r, cx+r, cy+r], fill=(200, 180, 255, 255))
+        d.ellipse([cx-r//2, cy-r//2, cx, cy], fill=(255, 255, 255, 200))
+        return img
 
 # ── Paleta ────────────────────────────────────────────────────────────────────
 
@@ -775,6 +789,20 @@ class AppWindow(tk.Tk):
         self.minsize(860, 580)
         self.configure(bg=BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._close)
+
+        # Icono de la ventana
+        try:
+            ico_path = _resource_path("app.ico")
+            if os.path.isfile(ico_path):
+                self.iconbitmap(ico_path)
+        except Exception:
+            pass
+        try:
+            icon_img = PILImage.open(_resource_path("app_icon.png")).convert("RGBA")
+            self._tk_icon = ImageTk.PhotoImage(icon_img.resize((32, 32), PILImage.LANCZOS))
+            self.iconphoto(True, self._tk_icon)
+        except Exception:
+            pass
 
         # Variables Tkinter
         self.dev_var          = tk.StringVar()
