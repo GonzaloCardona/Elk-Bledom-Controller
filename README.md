@@ -14,7 +14,7 @@ Aplicación de escritorio ligera y completa para Windows para controlar tiras LE
 - ☀️ **Control de brillo** (0–100%) y **velocidad**.
 - ⚡ **Paleta de colores rápidos** (10 presets).
 - 🌈 **20 modos de efectos dinámicos** (saltos de color, parpadeos, gradientes, etc.).
-- 🎵 **Modo Música Reactiva:** Captura de audio de salida del sistema vía WASAPI Loopback (sin necesidad de cables virtuales). Sincronización en tiempo real con separación por frecuencias (graves = rojo, medios = verde, agudos = azul).
+- 🎵 **Modo Discoteca / Música en Vivo:** Detección de bombos y beats en tiempo real vía WASAPI Loopback con colores neón puros al 100% (sin luz blanca). Varios estilos seleccionables (*Club / Beat Jump*, *Strobe / Destellos* y *Ecualizador Puro*), con control de sensibilidad y nivel de oscuridad de fondo.
 - 💿 **Modo Portada (Álbum / Reproductor):** Extrae automáticamente la carátula de lo que estás escuchando en Windows (Spotify, YouTube, Tidal, Apple Music, VLC...) y tiñe la habitación con el color de la portada. Permite elegir entre color *Vibrante* (estilo Wallpaper Engine / acento vivo) o *Dominante* (color mayoritario en píxeles).
 - 🖥️ **Modo Pantalla (Ambilight):** Captura de pantalla de ultra bajo retardo (con `mss`) que promedia los colores de la pantalla para iluminar la habitación en sincronía con juegos o películas.
 - 🪟 **Integración con Bandeja del Sistema (System Tray):** Minimiza a la bandeja sin cerrarse, con opciones de control rápido en el menú contextual.

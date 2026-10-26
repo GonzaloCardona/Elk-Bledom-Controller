@@ -207,13 +207,36 @@ class BLEEngine:
 
 # ── Modo Música ───────────────────────────────────────────────────────────────
 
-class AudioAnalyzer:
-    CHUNK=1024; SMOOTH=0.35
+# ── Paleta de discoteca ultra saturada (cero luz blanca) ─────────────────────
 
-    def __init__(self, on_color, on_log):
-        self.on_color=on_color; self.on_log=on_log
-        self._running=False; self._paused=False
-        self._r=self._g=self._b=0.0
+DISCO_PALETTE = [
+    (255, 0, 75),    # Magenta Neón / Rosa eléctrico
+    (0, 240, 255),   # Cian láser
+    (255, 230, 0),   # Amarillo eléctrico
+    (150, 0, 255),   # Púrpura discoteca
+    (0, 255, 60),    # Verde neón
+    (255, 35, 0),    # Rojo fuego
+    (0, 90, 255),    # Azul cobalto
+    (255, 120, 0),   # Naranja láser
+    (0, 255, 180),   # Turquesa brillante
+    (255, 0, 190),   # Fucsia salvaje
+]
+
+class AudioAnalyzer:
+    CHUNK = 1024
+
+    def __init__(self, on_color, on_log, style="club", sensitivity=6, min_brightness=10):
+        self.on_color       = on_color
+        self.on_log         = on_log
+        self.style          = style           # "club" | "strobe" | "pure_eq"
+        self.sensitivity    = sensitivity     # 1 a 10 (umbral de beat)
+        self.min_brightness = min_brightness / 100.0  # 0.0 a 0.30 (oscuridad de fondo)
+        self._running       = False
+        self._paused        = False
+        self._bass_avg      = 0.5
+        self._last_beat_t   = 0.0
+        self._cur_color     = DISCO_PALETTE[0]
+        self._intensity     = 0.0
 
     def start(self):
         try:
@@ -224,51 +247,123 @@ class AudioAnalyzer:
             import numpy  # lazy
         except ImportError:
             self.on_log("❌ pip install numpy"); return False
-        self._running=True
-        threading.Thread(target=self._loop, daemon=True).start(); return True
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+        return True
 
-    def stop(self):  self._running=False
-    def pause(self): self._paused=True
-    def resume(self):self._paused=False
+    def stop(self):  self._running = False
+    def pause(self): self._paused = True
+    def resume(self): self._paused = False
+
+    def update_params(self, style=None, sensitivity=None, min_brightness=None):
+        if style is not None: self.style = style
+        if sensitivity is not None: self.sensitivity = int(sensitivity)
+        if min_brightness is not None: self.min_brightness = float(min_brightness) / 100.0
 
     def _loop(self):
         import pyaudiowpatch as pa
         import numpy as np
-        p=stream=None
+        import random
+        p = stream = None
         try:
-            p=pa.PyAudio()
-            wasapi=p.get_host_api_info_by_type(pa.paWASAPI)
-            loopback=p.get_wasapi_loopback_analogue_by_index(wasapi["defaultOutputDevice"])
-            sr=int(loopback["defaultSampleRate"])
-            ch=int(loopback["maxInputChannels"])
-            dev=int(loopback["index"])
-            self.on_log(f"🎵 Loopback: {loopback['name']} ({ch}ch · {sr}Hz)")
-            stream=p.open(format=pa.paFloat32, channels=ch, rate=sr,
-                          input=True, input_device_index=dev,
-                          frames_per_buffer=self.CHUNK)
-            self.on_log("🎵 Captura activa")
+            p = pa.PyAudio()
+            wasapi = p.get_host_api_info_by_type(pa.paWASAPI)
+            loopback = p.get_wasapi_loopback_analogue_by_index(wasapi["defaultOutputDevice"])
+            sr = int(loopback["defaultSampleRate"])
+            ch = int(loopback["maxInputChannels"])
+            dev = int(loopback["index"])
+            self.on_log(f"🎵 Modo Discoteca activo ({loopback['name']})")
+            stream = p.open(format=pa.paFloat32, channels=ch, rate=sr,
+                            input=True, input_device_index=dev,
+                            frames_per_buffer=self.CHUNK)
+
+            # Velocidad de decaimiento rítmico (~18% por buffer de 20ms)
+            decay = 0.82
+
             while self._running:
                 if self._paused:
                     time.sleep(0.1); continue
-                raw=stream.read(self.CHUNK, exception_on_overflow=False)
-                samples=np.frombuffer(raw, dtype=np.float32)
-                if ch>1: samples=samples.reshape(-1,ch).mean(axis=1)
-                win=np.hanning(len(samples))
-                fft=np.abs(np.fft.rfft(samples*win))
-                freqs=np.fft.rfftfreq(len(samples), d=1.0/sr)
-                def band(lo,hi):
-                    m=(freqs>=lo)&(freqs<hi); return float(np.mean(fft[m])) if m.any() else 0.0
-                def norm(v):
-                    return min(1.0,math.log1p(max(0,v)*80)/math.log1p(80))
-                s=self.SMOOTH
-                self._r=self._r*(1-s)+norm(band(20,300))*s
-                self._g=self._g*(1-s)+norm(band(300,2500))*s
-                self._b=self._b*(1-s)+norm(band(2500,16000))*s
-                self.on_color(int(self._r*255),int(self._g*255),int(self._b*255))
+
+                raw = stream.read(self.CHUNK, exception_on_overflow=False)
+                samples = np.frombuffer(raw, dtype=np.float32)
+                if ch > 1: samples = samples.reshape(-1, ch).mean(axis=1)
+
+                win = np.hanning(len(samples))
+                fft = np.abs(np.fft.rfft(samples * win))
+                freqs = np.fft.rfftfreq(len(samples), d=1.0 / sr)
+
+                # Graves / Bombo (Kick): 30 - 130 Hz
+                m_bass = (freqs >= 30) & (freqs < 130)
+                bass = float(np.mean(fft[m_bass])) if m_bass.any() else 0.0
+
+                # Medios: 300 - 2200 Hz
+                m_mid = (freqs >= 300) & (freqs < 2200)
+                mid = float(np.mean(fft[m_mid])) if m_mid.any() else 0.0
+
+                # Agudos / Hi-Hats: 2500 - 14000 Hz
+                m_high = (freqs >= 2500) & (freqs < 14000)
+                high = float(np.mean(fft[m_high])) if m_high.any() else 0.0
+
+                # Actualizar media adaptativa de graves
+                self._bass_avg = self._bass_avg * 0.95 + bass * 0.05
+                now = time.time()
+
+                if self.style == "club":
+                    # Umbral adaptativo según sensibilidad (1 a 10)
+                    multiplier = 1.15 + (10 - self.sensitivity) * 0.12
+                    threshold = max(0.08, self._bass_avg * multiplier)
+
+                    # Detección de beat con bloqueo mínimo de 130ms entre bombos
+                    is_beat = (bass > threshold) and (now - self._last_beat_t > 0.13)
+                    if is_beat:
+                        self._last_beat_t = now
+                        candidates = [c for c in DISCO_PALETTE if c != self._cur_color]
+                        self._cur_color = random.choice(candidates)
+                        self._intensity = 1.0
+                    else:
+                        self._intensity = max(self.min_brightness, self._intensity * decay)
+
+                    # Colores 100% saturados sin blanco
+                    out_r = int(self._cur_color[0] * self._intensity)
+                    out_g = int(self._cur_color[1] * self._intensity)
+                    out_b = int(self._cur_color[2] * self._intensity)
+                    self.on_color(out_r, out_g, out_b)
+
+                elif self.style == "strobe":
+                    threshold = max(0.12, self._bass_avg * (1.2 + (10 - self.sensitivity) * 0.15))
+                    is_hit = (bass > threshold or high > threshold * 1.5) and (now - self._last_beat_t > 0.09)
+                    if is_hit:
+                        self._last_beat_t = now
+                        flash = random.choice(DISCO_PALETTE)
+                        self.on_color(flash[0], flash[1], flash[2])
+                    else:
+                        min_c = int(255 * self.min_brightness)
+                        self.on_color(min_c, 0, min_c // 2)
+
+                elif self.style == "pure_eq":
+                    # Ecualizador puro: la banda dominante gana al 100% (evita luz blanca)
+                    b = bass ** 2.2
+                    m = (mid * 1.8) ** 2.2
+                    h = (high * 2.2) ** 2.2
+                    tot = b + m + h + 1e-9
+                    nb, nm, nh = b / tot, m / tot, h / tot
+                    mx = max(nb, nm, nh)
+
+                    if mx == nb:
+                        cur = (255, int(nm * 50), 0)    # Rojo / Naranja neón de graves
+                    elif mx == nm:
+                        cur = (0, 255, int(nh * 60))    # Verde esmeralda de medios
+                    else:
+                        cur = (int(nb * 70), 0, 255)    # Azul / Púrpura de agudos
+
+                    vol = min(1.0, math.log1p(bass + mid + high) / math.log1p(3.0))
+                    vol = max(self.min_brightness, vol)
+                    self.on_color(int(cur[0] * vol), int(cur[1] * vol), int(cur[2] * vol))
+
         except Exception as e:
             self.on_log(f"❌ Audio: {e}")
         finally:
-            self._running=False
+            self._running = False
             if stream:
                 try: stream.stop_stream(); stream.close()
                 except: pass
@@ -589,9 +684,10 @@ class AppState:
         if self._worker: self._worker.stop(); self._worker=None
         self.active_mode=None
 
-    def start_music(self):
+    def start_music(self, style="club", sensitivity=6, min_brightness=10):
         self.stop_worker()
-        w=AudioAnalyzer(self._on_reactive_color, self._log)
+        w=AudioAnalyzer(self._on_reactive_color, self._log, style=style,
+                        sensitivity=sensitivity, min_brightness=min_brightness)
         if w.start():
             self._worker=w; self.active_mode="music"; return True
         return False
@@ -671,6 +767,13 @@ class AppWindow(tk.Tk):
         self.monitor_var   = tk.StringVar()
         self.autostart_var = tk.BooleanVar(value=is_autostart())
         self.cur_color     = (255,100,50)
+        self.music_sens_var = tk.IntVar(value=6)
+        self.music_dark_var = tk.IntVar(value=10)
+        self._music_style_map = {
+            "🎉 Club / Beat Jump (Cambio de color con bombo)": "club",
+            "⚡ Strobe / Destellos rápidos": "strobe",
+            "🌊 Ecualizador Puro (Sin luz blanca)": "pure_eq"
+        }
         self._album_tk_img = None
         self.album_sat_var   = tk.DoubleVar(value=1.8)
         self.album_bri_var   = tk.IntVar(value=85)
@@ -696,7 +799,7 @@ class AppWindow(tk.Tk):
         if state.connected:
             self._on_status("connected")
         if state.active_mode == "music":
-            self.btn_music.config(text="⏹  Detener modo música", bg=ERR)
+            self.btn_music.config(text="⏹  Detener modo discoteca", bg=ERR)
         elif state.active_mode == "screen":
             self.btn_screen.config(text="⏹  Detener modo pantalla", bg=ERR)
         elif state.active_mode == "album":
@@ -891,28 +994,46 @@ class AppWindow(tk.Tk):
         tk.Label(sr,textvariable=self.speed_var,fg=DIM,bg=CARD,font=("Courier New",9),width=3).pack(side="right")
 
     def _build_music(self,p):
-        inn=self._card(p,"🎵  MODO MÚSICA   graves=🔴  medios=🟢  agudos=🔵")
+        inn=self._card(p,"🎵  MODO DISCOTECA / MÚSICA EN VIVO")
         tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
-                 text="Captura audio del sistema automáticamente.\n"
+                 text="Luces reactivas al ritmo de la música con colores neón puros (sin luz blanca).\n"
                       "Requiere:  pip install pyaudiowpatch numpy"
                  ).pack(anchor="w",pady=(0,6))
-        bl=tk.Frame(inn,bg=CARD); bl.pack(fill="x")
-        for t,c in [("Graves",ERR),("Medios",OK),("Agudos","#60a5fa")]:
-            tk.Label(bl,text=t,fg=c,bg=CARD,font=("Helvetica",8)).pack(side="left",expand=True)
-        self.vu_music=tk.Canvas(inn,height=14,bg=PANEL,highlightthickness=0)
-        self.vu_music.pack(fill="x",pady=(2,6))
-        sr=tk.Frame(inn,bg=CARD); sr.pack(fill="x",pady=(0,6))
-        tk.Label(sr,text="Suavizado:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        tk.Scale(sr,from_=0.05,to=1.0,resolution=0.05,orient="horizontal",
-                 variable=self.smooth_music,bg=CARD,fg=TXT,troughcolor=PANEL,
-                 activebackground=MUSIC,highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:setattr(self.state._worker,"SMOOTH",float(v))
-                                  if isinstance(self.state._worker,AudioAnalyzer) else None
+
+        mr=tk.Frame(inn,bg=CARD); mr.pack(fill="x",pady=(0,6))
+        tk.Label(mr,text="Estilo de fiesta:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left",padx=(0,6))
+        self.music_style_cb=ttk.Combobox(mr,values=list(self._music_style_map.keys()),state="readonly",font=("Helvetica",8))
+        self.music_style_cb.current(0)
+        self.music_style_cb.pack(side="left",fill="x",expand=True)
+        self.music_style_cb.bind("<<ComboboxSelected>>",self._on_music_param_change)
+
+        sr1=tk.Frame(inn,bg=CARD); sr1.pack(fill="x",pady=(4,2))
+        tk.Label(sr1,text="Sensibilidad al bombo:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
+        tk.Scale(sr1,from_=1,to=10,orient="horizontal",variable=self.music_sens_var,
+                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=MUSIC,
+                 highlightthickness=0,bd=0,sliderlength=14,
+                 command=lambda v:self._on_music_param_change()
                  ).pack(side="left",fill="x",expand=True,padx=6)
-        self.btn_music=self._btn(inn,"🎵  Activar modo música",self._toggle_music,MUSIC)
+        tk.Label(sr1,textvariable=self.music_sens_var,fg=DIM,bg=CARD,font=("Courier New",8),width=3).pack(side="right")
+
+        sr2=tk.Frame(inn,bg=CARD); sr2.pack(fill="x",pady=(0,6))
+        tk.Label(sr2,text="Luz entre bombos:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
+        tk.Scale(sr2,from_=0,to=30,orient="horizontal",variable=self.music_dark_var,
+                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=MUSIC,
+                 highlightthickness=0,bd=0,sliderlength=14,
+                 command=lambda v:self._on_music_param_change()
+                 ).pack(side="left",fill="x",expand=True,padx=6)
+        tk.Label(sr2,textvariable=self.music_dark_var,fg=DIM,bg=CARD,font=("Courier New",8),width=3).pack(side="right")
+
+        pr=tk.Frame(inn,bg=CARD); pr.pack(fill="x",pady=(2,6))
+        tk.Label(pr,text="Color en vivo:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
+        self.music_preview=tk.Label(pr,text="         ",width=10,relief="flat",bg=CARD)
+        self.music_preview.pack(side="left",padx=6,ipady=4)
+        self.lbl_music=tk.Label(pr,text="",fg=DIM,bg=CARD,font=("Courier New",8))
+        self.lbl_music.pack(side="left")
+
+        self.btn_music=self._btn(inn,"🎵  Activar modo discoteca",self._toggle_music,MUSIC)
         self.btn_music.pack(fill="x",ipady=6)
-        self.lbl_music=tk.Label(inn,text="",fg=DIM,bg=CARD,font=("Courier New",8))
-        self.lbl_music.pack(anchor="w",pady=(4,0))
 
     def _build_screen(self,p):
         inn=self._card(p,"🖥️  MODO PANTALLA (Ambilight)")
@@ -1073,13 +1194,25 @@ class AppWindow(tk.Tk):
     def _toggle_music(self):
         if self.state.active_mode=="music":
             self.state.stop_worker(); self._reset_mode_buttons()
-            self.state._log("⏹  Modo música desactivado"); return
+            self.state._log("⏹  Modo discoteca desactivado"); return
         if not self.state.connected:
             self.state._log("⚠️  Conecta primero un dispositivo LED"); return
         self._reset_mode_buttons()
-        if self.state.start_music():
-            self.btn_music.config(text="⏹  Detener modo música",bg=ERR)
-            self.state._log("🎵 Modo música activo")
+        style_name=self.music_style_cb.get()
+        style=self._music_style_map.get(style_name,"club")
+        sens=self.music_sens_var.get()
+        dark=self.music_dark_var.get()
+        if self.state.start_music(style=style,sensitivity=sens,min_brightness=dark):
+            self.btn_music.config(text="⏹  Detener modo discoteca",bg=ERR)
+            self.state._log("🎵 Modo discoteca activo")
+
+    def _on_music_param_change(self,e=None):
+        if isinstance(self.state._worker,AudioAnalyzer):
+            style_name=self.music_style_cb.get()
+            style=self._music_style_map.get(style_name,"club")
+            sens=self.music_sens_var.get()
+            dark=self.music_dark_var.get()
+            self.state._worker.update_params(style=style,sensitivity=sens,min_brightness=dark)
 
     def _toggle_screen(self):
         if self.state.active_mode=="screen":
@@ -1137,10 +1270,10 @@ class AppWindow(tk.Tk):
         except Exception: pass
 
     def _reset_mode_buttons(self):
-        self.btn_music.config(text="🎵  Activar modo música",bg=MUSIC)
+        self.btn_music.config(text="🎵  Activar modo discoteca",bg=MUSIC)
         self.btn_screen.config(text="🖥️  Activar modo pantalla",bg=AMBIL)
         self.btn_album.config(text="💿  Activar modo portada",bg=MEDIA)
-        self.lbl_music.config(text="")
+        self.music_preview.config(bg=CARD); self.lbl_music.config(text="")
         self.screen_preview.config(bg=CARD); self.lbl_screen_rgb.config(text="")
         self.album_color_preview.config(bg=CARD)
 
@@ -1197,15 +1330,8 @@ class AppWindow(tk.Tk):
         try:
             hx=self._hex(r,g,b)
             if self.state.active_mode=="music":
-                w=self.vu_music.winfo_width()
-                if w>=10:
-                    h=self.vu_music.winfo_height() or 14; bw=w//3
-                    self.vu_music.delete("all")
-                    for i,(v,c) in enumerate([(r/255,ERR),(g/255,OK),(b/255,"#60a5fa")]):
-                        x0=i*bw+2; fw=int((bw-4)*v)
-                        self.vu_music.create_rectangle(x0,2,x0+bw-4,h-2,fill=PANEL,outline="")
-                        if fw>0: self.vu_music.create_rectangle(x0,2,x0+fw,h-2,fill=c,outline="")
-                self.lbl_music.config(text=f"RGB({r:3d},{g:3d},{b:3d})  {hx}",
+                self.music_preview.config(bg=hx)
+                self.lbl_music.config(text=f" RGB({r:3d},{g:3d},{b:3d})",
                                        fg=hx if max(r,g,b)>25 else DIM)
             elif self.state.active_mode=="screen":
                 self.screen_preview.config(bg=hx)
