@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,34 +37,40 @@ jobs:
         run: |
           pyinstaller ELK-BLEDOM.spec
 
-      - name: Determine Tag Name
+      - name: Determine Release Metadata
         id: vars
         shell: bash
         run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          CLEAN_MSG=$(echo "${{ github.event.head_commit.message }}" | head -n 1)
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-            echo "title=Release ${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            TAG="${GITHUB_REF#refs/tags/}"
+            TITLE="Release ${TAG}"
           else
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "title=ELK-BLEDOM Controller (Latest Build)" >> $GITHUB_OUTPUT
+            TAG="build-${{ github.run_number }}-${SHORT_SHA}"
+            TITLE="Build #${{ github.run_number }}: ${CLEAN_MSG}"
           fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "title=${TITLE}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "clean_msg=${CLEAN_MSG}" >> $GITHUB_OUTPUT
 
-      - name: Create or Update Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.title }}
           body: |
-            ## Versión compilada automática 🚀
-            
-            Este ejecutable se compila automáticamente mediante GitHub Actions en cada actualización.
-            
-            - **Commit:** `${{ github.sha }}`
-            - **Mensaje:** ${{ github.event.head_commit.message }}
-            
-            ### Descarga:
-            Descarga el archivo **`ELK-BLEDOM.exe`** adjunto y ejecútalo directamente en Windows (no requiere tener Python instalado).
+            ### 📝 Changelog / Información del Commit
+            - **Commit:** [`${{ steps.vars.outputs.short_sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            - **Mensaje:** ${{ steps.vars.outputs.clean_msg }}
+            - **Autor:** ${{ github.event.head_commit.author.name }}
+
+            ### 📦 Descarga
+            Descarga el archivo adjunto **`ELK-BLEDOM.exe`** y ejecútalo directamente en Windows 10/11 (no requiere tener Python instalado).
           files: dist/ELK-BLEDOM.exe
+          generate_release_notes: true
           draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -715,9 +715,8 @@ class AppState:
 
     def set_background(self, is_bg: bool):
         """Pausar/reanudar workers según si estamos en segundo plano."""
-        if self._worker:
-            if is_bg: self._worker.pause()
-            else:     self._worker.resume()
+        # Mantener los efectos reactivos funcionando en segundo plano si el usuario los activó
+        pass
 
     def _on_reactive_color(self, r, g, b):
         now=time.time()
@@ -742,56 +741,81 @@ class AppState:
 
 # ── Ventana principal (se puede destruir y recrear) ───────────────────────────
 
+# -*- coding: utf-8 -*-
+
+# ── Paleta moderna y estilizada ───────────────────────────────────────────────
+BG_MAIN = "#0d0f17"   # Fondo principal
+BG_SIDE = "#121522"   # Barra lateral
+BG_CARD = "#1a1e2f"   # Tarjetas
+BG_HDR  = "#141724"   # Encabezado
+BORDER  = "#262b40"   # Bordes sutiles
+ACCENT  = "#6366f1"   # Índigo vibrante
+ACCENT2 = "#ec4899"   # Rosa fucsia
+TXT     = "#f8fafc"   # Texto blanco suave
+DIM     = "#94a3b8"   # Texto secundario
+OK      = "#22c55e"   # Verde esmeralda
+WARN    = "#eab308"   # Amarillo
+ERR     = "#ef4444"   # Rojo coral
+MUSIC   = "#f43f5e"   # Rosa neón discoteca
+AMBIL   = "#0ea5e9"   # Azul ambilight
+MEDIA   = "#a855f7"   # Púrpura carátula
+
 class AppWindow(tk.Tk):
     def __init__(self, state: AppState, on_close_to_tray):
         super().__init__()
         self.state = state
         self._on_close_to_tray = on_close_to_tray
         self._monmap = {}
+        self._tab_buttons = {}
+        self._views = {}
+        self.current_tab = None
 
-        self.title(APP_NAME)
-        self.geometry("940x720"); self.minsize(820,600)
-        self.configure(bg=BG)
+        self.title(f"{APP_NAME} LED Controller")
+        self.geometry("980x680")
+        self.minsize(860, 580)
+        self.configure(bg=BG_MAIN)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-        # Variables Tk (locales a la ventana)
-        self.dev_var       = tk.StringVar()
-        self.effect_var    = tk.StringVar(value="Sin efecto")
-        self.speed_var     = tk.IntVar(value=60)
-        self.bright_var    = tk.IntVar(value=80)
-        self.r_var         = tk.IntVar(value=255)
-        self.g_var         = tk.IntVar(value=100)
-        self.b_var         = tk.IntVar(value=50)
-        self.smooth_music  = tk.DoubleVar(value=0.35)
-        self.smooth_screen = tk.DoubleVar(value=0.40)
-        self.monitor_var   = tk.StringVar()
-        self.autostart_var = tk.BooleanVar(value=is_autostart())
-        self.cur_color     = (255,100,50)
-        self.music_sens_var = tk.IntVar(value=6)
-        self.music_dark_var = tk.IntVar(value=10)
+        # Variables Tkinter
+        self.dev_var          = tk.StringVar()
+        self.effect_var       = tk.StringVar(value="Sin efecto")
+        self.speed_var        = tk.IntVar(value=60)
+        self.bright_var       = tk.IntVar(value=80)
+        self.r_var            = tk.IntVar(value=255)
+        self.g_var            = tk.IntVar(value=100)
+        self.b_var            = tk.IntVar(value=50)
+        self.smooth_screen    = tk.DoubleVar(value=0.40)
+        self.monitor_var      = tk.StringVar()
+        self.autostart_var    = tk.BooleanVar(value=is_autostart())
+        self.cur_color        = (255, 100, 50)
+        self.live_color_var   = tk.BooleanVar(value=True)
+
+        self.music_sens_var   = tk.IntVar(value=6)
+        self.music_dark_var   = tk.IntVar(value=10)
         self._music_style_map = {
-            "🎉 Club / Beat Jump (Cambio de color con bombo)": "club",
-            "⚡ Strobe / Destellos rápidos": "strobe",
-            "🌊 Ecualizador Puro (Sin luz blanca)": "pure_eq"
-        }
-        self._album_tk_img = None
-        self.album_sat_var   = tk.DoubleVar(value=1.8)
-        self.album_bri_var   = tk.IntVar(value=85)
-        self.album_pure_var  = tk.BooleanVar(value=True)
-        self._album_method_map = {
-            "🎨 Vibrante / Acento (Wallpaper Engine)": "vibrant",
-            "📊 Dominante (Color que más se repite)": "dominant"
+            "🎉 Club / Beat Jump (Salto de color con bombo)": "club",
+            "⚡ Strobe / Destellos ultrarrápidos": "strobe",
+            "🌊 Ecualizador Puro (Graves/Medios/Agudos)": "pure_eq"
         }
 
-        # Conectar callbacks del estado a esta ventana
+        self._album_tk_img    = None
+        self.album_sat_var    = tk.DoubleVar(value=1.8)
+        self.album_bri_var    = tk.IntVar(value=85)
+        self.album_pure_var   = tk.BooleanVar(value=True)
+        self._album_method_map = {
+            "🎨 Vibrante / Acento (Wallpaper Engine)": "vibrant",
+            "📊 Dominante (Color mayoritario)": "dominant"
+        }
+
+        # Conectar callbacks del estado
         state._log_cb     = self._append_log
         state._status_cb  = self._on_status
         state._devices_cb = self._on_devices
         state.window      = self
 
-        self._build()
+        self._build_modern_ui()
 
-        # Volcar buffer de log acumulado mientras no había ventana
+        # Volcar logs pendientes
         for msg in state._log_buf:
             self._append_log(msg)
 
@@ -805,360 +829,550 @@ class AppWindow(tk.Tk):
         elif state.active_mode == "album":
             self.btn_album.config(text="⏹  Detener modo portada", bg=ERR)
 
-        # La ventana pasa a primer plano → reanudar workers
         state.set_background(False)
 
     def _close(self):
-        """Ocultar ventana: destruirla para liberar RAM de Tk."""
-        # Pausar workers (siguen corriendo en AppState, solo pausados)
-        self.state.set_background(True)
-        # Desconectar callbacks
-        self.state._log_cb    = None
-        self.state._status_cb = None
-        self.state._devices_cb= None
-        self.state.window     = None
-        self._on_close_to_tray()
-        self.destroy()   # ← libera toda la RAM de Tk (~150-200 MB)
+        # Si la bandeja del sistema está activa, ocultamos la ventana en lugar de destruirla
+        # para que la reapertura desde el tray sea instantánea (<15ms)
+        if TRAY_OK and AppState._tray:
+            self.withdraw()
+            if self._on_close_to_tray:
+                try: self._on_close_to_tray()
+                except Exception: pass
+        else:
+            self.state._log_cb     = None
+            self.state._status_cb  = None
+            self.state._devices_cb = None
+            self.state.window      = None
+            if self._on_close_to_tray:
+                try: self._on_close_to_tray()
+                except Exception: pass
+            self.destroy()
 
     # ═══════════════════════════════════════════════════════════════════════
-    # UI
+    # ESTRUCTURA DE LA INTERFAZ MODERNA (Header + Sidebar + Content)
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _build(self):
-        hdr=tk.Frame(self,bg=PANEL,height=56); hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr,text=f"● {APP_NAME}  LED Controller",fg=TXT,bg=PANEL,
-                 font=("Courier New",15,"bold")).pack(side="left",padx=16,pady=12)
-        self.lbl_st=tk.Label(hdr,text="⬤  Desconectado",fg=ERR,bg=PANEL,font=("Helvetica",10))
-        self.lbl_st.pack(side="right",padx=16)
+    def _build_modern_ui(self):
+        # 1. Header Superior Fijo
+        self.hdr = tk.Frame(self, bg=BG_HDR, height=62, highlightthickness=1, highlightbackground=BORDER)
+        self.hdr.pack(fill="x", side="top")
+        self.hdr.pack_propagate(False)
 
-        body=tk.Frame(self,bg=BG); body.pack(fill="both",expand=True,padx=10,pady=8)
-        right=tk.Frame(body,bg=BG,width=240); right.pack(side="right",fill="y",padx=(8,0))
-        right.pack_propagate(False); self._build_log(right)
+        # Logo y Título
+        title_box = tk.Frame(self.hdr, bg=BG_HDR)
+        title_box.pack(side="left", padx=18, pady=10)
+        tk.Label(title_box, text="⚡", font=("Segoe UI Emoji", 16), bg=BG_HDR, fg=ACCENT).pack(side="left", padx=(0, 8))
+        lbl_brand = tk.Label(title_box, text=APP_NAME, font=("Segoe UI", 13, "bold"), bg=BG_HDR, fg=TXT)
+        lbl_brand.pack(side="left")
+        tk.Label(title_box, text="· Controller", font=("Segoe UI", 11), bg=BG_HDR, fg=DIM).pack(side="left", padx=(4, 0))
 
-        lw=tk.Frame(body,bg=BG); lw.pack(side="left",fill="both",expand=True)
-        self._cv=tk.Canvas(lw,bg=BG,highlightthickness=0)
-        vsb=tk.Scrollbar(lw,orient="vertical",command=self._cv.yview)
-        self._cv.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right",fill="y"); self._cv.pack(side="left",fill="both",expand=True)
-        self._fr=tk.Frame(self._cv,bg=BG)
-        self._wid=self._cv.create_window((0,0),window=self._fr,anchor="nw")
-        self._fr.bind("<Configure>",lambda e:self._cv.configure(scrollregion=self._cv.bbox("all")))
-        self._cv.bind("<Configure>",lambda e:self._cv.itemconfig(self._wid,width=e.width))
-        self._cv.bind_all("<MouseWheel>",
-            lambda e:self._cv.yview_scroll(-1*(e.delta//120),"units"))
+        # Indicador de Estado BLE
+        st_box = tk.Frame(self.hdr, bg=BG_HDR)
+        st_box.pack(side="left", padx=24)
+        self.lbl_st_dot = tk.Label(st_box, text="●", font=("Segoe UI", 11), bg=BG_HDR, fg=ERR)
+        self.lbl_st_dot.pack(side="left", padx=(0, 6))
+        self.lbl_st_text = tk.Label(st_box, text="Desconectado", font=("Segoe UI", 9, "bold"), bg=BG_HDR, fg=DIM)
+        self.lbl_st_text.pack(side="left")
 
-        self._build_ble(self._fr)
-        self._build_power(self._fr)
-        self._build_color(self._fr)
-        self._build_presets(self._fr)
-        self._build_effects(self._fr)
-        self._build_music(self._fr)
-        self._build_screen(self._fr)
-        self._build_album(self._fr)
-        self._build_settings(self._fr)
+        # Controles Rápidos en el Header (Brillo Global + Botón On/Off)
+        hdr_right = tk.Frame(self.hdr, bg=BG_HDR)
+        hdr_right.pack(side="right", padx=16, pady=8)
 
-    # ── helpers ──────────────────────────────────────────────────────────
+        # Control rápido de brillo
+        br_box = tk.Frame(hdr_right, bg=BG_HDR)
+        br_box.pack(side="left", padx=(0, 20))
+        tk.Label(br_box, text="☀️", font=("Segoe UI Emoji", 10), bg=BG_HDR, fg=DIM).pack(side="left", padx=(0, 4))
+        sc_br = tk.Scale(br_box, from_=0, to=100, orient="horizontal", variable=self.bright_var,
+                         bg=BG_HDR, fg=TXT, troughcolor=BG_MAIN, activebackground=ACCENT,
+                         highlightthickness=0, bd=0, sliderlength=14, length=120, command=self._on_bright)
+        sc_br.pack(side="left")
+        self.lbl_br_num = tk.Label(br_box, text="80%", font=("Segoe UI", 9, "bold"), bg=BG_HDR, fg=TXT, width=4)
+        self.lbl_br_num.pack(side="left")
 
-    def _card(self,parent,title):
-        f=tk.Frame(parent,bg=CARD); f.pack(fill="x",pady=(0,8))
-        if title:
-            tk.Label(f,text=title,fg=DIM,bg=CARD,
-                     font=("Helvetica",8,"bold")).pack(anchor="w",padx=12,pady=(8,2))
-        inn=tk.Frame(f,bg=CARD); inn.pack(fill="x",padx=12,pady=(0,10)); return inn
+        # Botón de encendido / apagado destacado
+        self.btn_pwr = tk.Button(hdr_right, text="⏻ ENCENDIDO", font=("Segoe UI", 10, "bold"),
+                                 bg=OK, fg="white", bd=0, relief="flat", cursor="hand2",
+                                 padx=14, pady=6, activebackground="#16a34a", activeforeground="white",
+                                 command=self._toggle_power)
+        self.btn_pwr.pack(side="left")
 
-    def _btn(self,parent,text,cmd,bg=ACCENT,**kw):
-        kw.setdefault("fg","white"); kw.setdefault("font",("Helvetica",10,"bold"))
-        kw.setdefault("bd",0); kw.setdefault("relief","flat"); kw.setdefault("cursor","hand2")
-        kw.setdefault("activebackground",bg); kw.setdefault("activeforeground","white")
-        return tk.Button(parent,text=text,bg=bg,command=cmd,**kw)
+        # 2. Contenedor Principal (Sidebar a la izquierda + Vistas a la derecha)
+        main_body = tk.Frame(self, bg=BG_MAIN)
+        main_body.pack(fill="both", expand=True)
 
-    def _style_cb(self):
-        s=ttk.Style(); s.theme_use("clam")
-        s.configure("TCombobox",fieldbackground=PANEL,background=PANEL,foreground=TXT,
-                    selectbackground=ACCENT,selectforeground="white",
-                    bordercolor=CARD,lightcolor=CARD,darkcolor=CARD,arrowcolor=TXT)
+        # Sidebar lateral
+        self.sidebar = tk.Frame(main_body, bg=BG_SIDE, width=220, highlightthickness=1, highlightbackground=BORDER)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
 
-    # ── paneles ──────────────────────────────────────────────────────────
+        # Área de contenido de pestañas
+        self.content_area = tk.Frame(main_body, bg=BG_MAIN)
+        self.content_area.pack(side="left", fill="both", expand=True, padx=20, pady=18)
 
-    def _build_ble(self,p):
-        inn=self._card(p,"DISPOSITIVO BLUETOOTH")
-        r1=tk.Frame(inn,bg=CARD); r1.pack(fill="x",pady=(0,6))
-        self.dev_cb=ttk.Combobox(r1,textvariable=self.dev_var,state="readonly",font=("Courier New",9))
-        self.dev_cb.pack(side="left",fill="x",expand=True,padx=(0,6)); self._style_cb()
-        self._btn(r1,"🔍 Escanear",self._do_scan,ACCENT).pack(side="left",ipadx=6,ipady=4)
-        r2=tk.Frame(inn,bg=CARD); r2.pack(fill="x")
-        self.btn_con=self._btn(r2,"Conectar",self._do_connect,OK)
-        self.btn_dis=self._btn(r2,"Desconectar",self._do_disconnect,ERR)
-        self.btn_con.pack(side="left",ipadx=12,ipady=5)
-        self.btn_dis.pack(side="left",padx=8,ipadx=8,ipady=5)
-        self.btn_dis.config(state="disabled" if not self.state.connected else "normal")
-        self.btn_con.config(state="normal"   if not self.state.connected else "disabled")
-        # Restaurar último dispositivo en el combo
-        last=self.state.cfg.get("last_device")
-        if last:
-            lbl=f"{last.get('name','?')}  [{last.get('address','')}]"
-            self.dev_cb["values"]=[lbl]; self.dev_var.set(lbl)
+        # Crear botones del sidebar
+        tk.Label(self.sidebar, text="MODOS Y AJUSTES", font=("Segoe UI", 8, "bold"), fg=DIM, bg=BG_SIDE).pack(anchor="w", padx=16, pady=(16, 8))
 
-    def _build_power(self,p):
-        inn=self._card(p,"ENCENDIDO / BRILLO")
-        row=tk.Frame(inn,bg=CARD); row.pack(fill="x")
-        self.btn_pwr=self._btn(row,"⏻  ENCENDIDO",self._toggle_power,OK)
-        self.btn_pwr.pack(side="left",ipadx=12,ipady=6)
-        tk.Label(row,text="Brillo:",fg=DIM,bg=CARD,font=("Helvetica",10)).pack(side="left",padx=(16,4))
-        self.lbl_br=tk.Label(row,text="80%",fg=TXT,bg=CARD,font=("Courier New",11,"bold"),width=4)
-        self.lbl_br.pack(side="right")
-        tk.Scale(inn,from_=0,to=100,orient="horizontal",variable=self.bright_var,
-                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=ACCENT,
-                 highlightthickness=0,bd=0,sliderlength=18,command=self._on_bright
-                 ).pack(fill="x",pady=(4,0))
+        tabs = [
+            ("color",    "🎨  Color & Presets"),
+            ("disco",    "🎵  Discoteca / Beat"),
+            ("album",    "💿  Carátula (Álbum)"),
+            ("screen",   "🖥️  Pantalla (Ambilight)"),
+            ("effects",  "🌈  Efectos Dinámicos"),
+            ("settings", "⚙️  Conexión & Ajustes"),
+            ("log",      "📋  Registro (Log)")
+        ]
 
-    def _build_color(self,p):
-        inn=self._card(p,"COLOR")
-        row=tk.Frame(inn,bg=CARD); row.pack(fill="x")
-        WH=150
-        self.wc=tk.Canvas(row,width=WH,height=WH,bg=CARD,highlightthickness=0,cursor="crosshair")
-        self.wc.pack(side="left"); self._draw_wheel(WH)
-        self.wc.bind("<Button-1>",self._wclick); self.wc.bind("<B1-Motion>",self._wclick)
-        sf=tk.Frame(row,bg=CARD); sf.pack(side="left",fill="both",expand=True,padx=(12,0))
-        for lbl,var,col in [("R",self.r_var,ERR),("G",self.g_var,OK),("B",self.b_var,"#60a5fa")]:
-            r2=tk.Frame(sf,bg=CARD); r2.pack(fill="x",pady=2)
-            tk.Label(r2,text=lbl,fg=col,bg=CARD,font=("Courier New",11,"bold"),width=2).pack(side="left")
-            tk.Scale(r2,from_=0,to=255,orient="horizontal",variable=var,
-                     bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=col,
-                     highlightthickness=0,bd=0,sliderlength=14,command=lambda _:self._on_rgb()
-                     ).pack(side="left",fill="x",expand=True,padx=4)
-            tk.Label(r2,textvariable=var,fg=DIM,bg=CARD,font=("Courier New",9),width=3).pack(side="right")
-        pr=tk.Frame(sf,bg=CARD); pr.pack(fill="x",pady=(8,0))
-        tk.Label(pr,text="Vista previa:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        self.preview=tk.Label(pr,text="       ",width=8,relief="flat",bg=self._hex(*self.cur_color))
-        self.preview.pack(side="left",padx=6,ipady=8)
-        self._btn(sf,"▶  Enviar color",self._send_color,ACCENT).pack(fill="x",pady=(8,0),ipady=5)
+        for tab_id, tab_label in tabs:
+            btn = tk.Button(self.sidebar, text=f"  {tab_label}", font=("Segoe UI", 9, "bold"),
+                            anchor="w", fg=DIM, bg=BG_SIDE, activebackground=BG_CARD, activeforeground=TXT,
+                            bd=0, relief="flat", cursor="hand2", padx=12, pady=10,
+                            command=lambda t=tab_id: self._select_tab(t))
+            btn.pack(fill="x", padx=8, pady=2)
+            self._tab_buttons[tab_id] = btn
 
-    def _draw_wheel(self,WH):
-        cx=cy=WH//2; r=WH//2-4
-        for y in range(WH):
-            for x in range(WH):
-                dx,dy=x-cx,y-cy; d=(dx*dx+dy*dy)**.5
-                if d<=r:
-                    h=math.atan2(dy,dx)/(2*math.pi)%1.0
-                    rgb=colorsys.hsv_to_rgb(h,d/r,1.0)
-                    c="#{:02x}{:02x}{:02x}".format(int(rgb[0]*255),int(rgb[1]*255),int(rgb[2]*255))
-                    self.wc.create_rectangle(x,y,x+1,y+1,outline=c,fill=c)
-        self.wc.create_oval(cx-r-1,cy-r-1,cx+r+1,cy+r+1,outline=PANEL,width=3)
-        self.wm=self.wc.create_oval(cx-5,cy-5,cx+5,cy+5,outline="white",fill="",width=2)
+        # Construir las vistas en content_area
+        self._build_view_color()
+        self._build_view_disco()
+        self._build_view_album()
+        self._build_view_screen()
+        self._build_view_effects()
+        self._build_view_settings()
+        self._build_view_log()
 
-    def _wclick(self,e):
-        WH=150; cx=cy=WH//2; r=WH//2-4
-        dx,dy=e.x-cx,e.y-cy; d=min((dx*dx+dy*dy)**.5,r)
-        h=math.atan2(dy,dx)/(2*math.pi)%1.0
-        rgb=colorsys.hsv_to_rgb(h,d/r,1.0)
-        rv,gv,bv=int(rgb[0]*255),int(rgb[1]*255),int(rgb[2]*255)
-        self.r_var.set(rv); self.g_var.set(gv); self.b_var.set(bv); self._upd_prev(rv,gv,bv)
-        mag=max((dx*dx+dy*dy)**.5,1); nx,ny=cx+dx/mag*d,cy+dy/mag*d
-        self.wc.coords(self.wm,nx-5,ny-5,nx+5,ny+5)
+        # Seleccionar pestaña inicial
+        self._select_tab("color")
 
-    def _on_rgb(self): self._upd_prev(self.r_var.get(),self.g_var.get(),self.b_var.get())
-    def _upd_prev(self,r,g,b): self.cur_color=(r,g,b); self.preview.config(bg=self._hex(r,g,b))
-    def _hex(self,r,g,b): return "#{:02x}{:02x}{:02x}".format(r,g,b)
+    def _select_tab(self, tab_id):
+        if self.current_tab == tab_id:
+            return
+        # Desmarcar anteriores
+        for tid, btn in self._tab_buttons.items():
+            btn.config(bg=BG_SIDE, fg=DIM)
+        # Ocultar vistas
+        for v in self._views.values():
+            v.pack_forget()
 
-    def _build_presets(self,p):
-        inn=self._card(p,"COLORES RAPIDOS")
-        row=tk.Frame(inn,bg=CARD); row.pack(fill="x")
-        for emoji,r,g,b,bg in [
-            ("❤️",255,0,0,"#f87171"),("🟠",255,80,0,"#fb923c"),("💛",255,200,0,"#facc15"),
-            ("💚",0,255,0,"#4ade80"),("🩵",0,255,200,"#2dd4bf"),("💙",0,80,255,"#60a5fa"),
-            ("💜",120,0,255,"#a78bfa"),("🩷",255,0,160,"#f472b6"),
-            ("⬜",255,255,255,"#cbd5e1"),("🌡️",255,180,80,"#fde68a"),
-        ]:
-            tk.Button(row,text=emoji,bg=bg,fg="white",bd=0,relief="flat",cursor="hand2",font=("",13),
-                      command=lambda r=r,g=g,b=b:self._preset(r,g,b)
-                      ).pack(side="left",padx=2,ipadx=3,ipady=3)
+        # Marcar activo
+        self.current_tab = tab_id
+        if tab_id in self._tab_buttons:
+            self._tab_buttons[tab_id].config(bg=BG_CARD, fg=TXT)
+        if tab_id in self._views:
+            self._views[tab_id].pack(fill="both", expand=True)
 
-    def _preset(self,r,g,b):
-        self.r_var.set(r); self.g_var.set(g); self.b_var.set(b); self._upd_prev(r,g,b)
-        self._send_color()
+    # ═══════════════════════════════════════════════════════════════════════
+    # VISTAS ESPECÍFICAS
+    # ═══════════════════════════════════════════════════════════════════════
 
-    def _build_effects(self,p):
-        inn=self._card(p,"EFECTOS")
-        row=tk.Frame(inn,bg=CARD); row.pack(fill="x")
-        self.eff_cb=ttk.Combobox(row,textvariable=self.effect_var,state="readonly",
-                                   values=list(EFFECTS.keys()),font=("Helvetica",10))
-        self.eff_cb.pack(side="left",fill="x",expand=True,padx=(0,8))
-        self._btn(row,"▶ Aplicar",self._send_effect,ACCENT2).pack(side="left",ipadx=10,ipady=4)
-        sr=tk.Frame(inn,bg=CARD); sr.pack(fill="x",pady=(6,0))
-        tk.Label(sr,text="Velocidad:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        tk.Scale(sr,from_=1,to=100,orient="horizontal",variable=self.speed_var,
-                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=ACCENT2,
-                 highlightthickness=0,bd=0,sliderlength=14
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(sr,textvariable=self.speed_var,fg=DIM,bg=CARD,font=("Courier New",9),width=3).pack(side="right")
+    # ── 1. VISTA COLOR & PRESETS ──────────────────────────────────────────
+    def _build_view_color(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["color"] = f
 
-    def _build_music(self,p):
-        inn=self._card(p,"🎵  MODO DISCOTECA / MÚSICA EN VIVO")
-        tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
-                 text="Luces reactivas al ritmo de la música con colores neón puros (sin luz blanca).\n"
-                      "Requiere:  pip install pyaudiowpatch numpy"
-                 ).pack(anchor="w",pady=(0,6))
+        # Tarjeta principal de selección de color
+        card = self._modern_card(f, "SELECTOR DE COLOR HSV & RGB")
 
-        mr=tk.Frame(inn,bg=CARD); mr.pack(fill="x",pady=(0,6))
-        tk.Label(mr,text="Estilo de fiesta:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left",padx=(0,6))
-        self.music_style_cb=ttk.Combobox(mr,values=list(self._music_style_map.keys()),state="readonly",font=("Helvetica",8))
+        content = tk.Frame(card, bg=BG_CARD)
+        content.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # Lado izquierdo: Rueda de color ultrarrápida generada con PIL
+        wheel_box = tk.Frame(content, bg=BG_CARD)
+        wheel_box.pack(side="left", padx=(0, 24))
+
+        WH = 160
+        self.wc = tk.Canvas(wheel_box, width=WH, height=WH, bg=BG_CARD, highlightthickness=0, cursor="crosshair")
+        self.wc.pack()
+
+        # Generar imagen de rueda con PIL (una sola vez, sin miles de rectángulos)
+        self._wheel_img = self._create_wheel_image(WH)
+        self.wc.create_image(WH // 2, WH // 2, image=self._wheel_img)
+        self.wm = self.wc.create_oval(WH//2 - 5, WH//2 - 5, WH//2 + 5, WH//2 + 5, outline="white", fill="", width=2)
+
+        # Clic y arrastre fluido con ratón
+        self.wc.bind("<Button-1>", self._wclick)
+        self.wc.bind("<B1-Motion>", self._wclick)
+
+        tk.Label(wheel_box, text="Arrastra para cambiar color", font=("Segoe UI", 8), bg=BG_CARD, fg=DIM).pack(pady=(4, 0))
+
+        # Lado derecho: Sliders RGB + Muestra grande de color
+        right_box = tk.Frame(content, bg=BG_CARD)
+        right_box.pack(side="left", fill="both", expand=True)
+
+        for name, var, col in [("R", self.r_var, "#f87171"), ("G", self.g_var, "#4ade80"), ("B", self.b_var, "#60a5fa")]:
+            row = tk.Frame(right_box, bg=BG_CARD)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=name, font=("Segoe UI", 9, "bold"), fg=col, bg=BG_CARD, width=2).pack(side="left")
+            sc = tk.Scale(row, from_=0, to=255, orient="horizontal", variable=var,
+                          bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=ACCENT,
+                          highlightthickness=0, bd=0, sliderlength=14, command=lambda v: self._on_rgb())
+            sc.pack(side="left", fill="x", expand=True, padx=6)
+            tk.Label(row, textvariable=var, font=("Courier New", 9), fg=DIM, bg=BG_CARD, width=4).pack(side="right")
+
+        # Fila de vista previa y botón de envío
+        prev_row = tk.Frame(right_box, bg=BG_CARD)
+        prev_row.pack(fill="x", pady=(12, 0))
+
+        self.preview = tk.Label(prev_row, text="       ", width=10, relief="flat", bg=self._hex(*self.cur_color))
+        self.preview.pack(side="left", ipady=8, padx=(0, 10))
+
+        self.lbl_hex = tk.Label(prev_row, text=self._hex(*self.cur_color), font=("Courier New", 10, "bold"), bg=BG_CARD, fg=TXT)
+        self.lbl_hex.pack(side="left", padx=(0, 12))
+
+        btn_send = tk.Button(prev_row, text="▶ Enviar a LEDs", font=("Segoe UI", 9, "bold"),
+                             bg=ACCENT, fg="white", bd=0, relief="flat", cursor="hand2", padx=14, pady=6,
+                             activebackground="#4f46e5", activeforeground="white", command=self._send_color)
+        btn_send.pack(side="left")
+
+        # Tarjeta secundaria: Presets rápidos
+        p_card = self._modern_card(f, "COLORES RÁPIDOS")
+        p_row = tk.Frame(p_card, bg=BG_CARD)
+        p_row.pack(fill="x", padx=12, pady=10)
+
+        presets = [
+            ("❤️ Rojo",      255, 0, 0,     "#dc2626"),
+            ("🟠 Naranja",   255, 90, 0,    "#ea580c"),
+            ("💛 Amarillo",  255, 220, 0,   "#ca8a04"),
+            ("💚 Verde",     0, 255, 40,    "#16a34a"),
+            ("🩵 Cian",      0, 240, 255,   "#0891b2"),
+            ("💙 Azul",      0, 100, 255,   "#2563eb"),
+            ("💜 Púrpura",   140, 0, 255,   "#7c3aed"),
+            ("🩷 Rosa",      255, 0, 150,   "#db2777"),
+            ("⬜ Blanco",    255, 255, 255, "#cbd5e1"),
+            ("🌡️ Cálido",    255, 180, 70,  "#d97706"),
+        ]
+
+        for label, r, g, b, bg_btn in presets:
+            b_btn = tk.Button(p_row, text=label, font=("Segoe UI", 9, "bold"),
+                              bg=bg_btn, fg="white", bd=0, relief="flat", cursor="hand2", padx=8, pady=6,
+                              activebackground=bg_btn, command=lambda r=r, g=g, b=b: self._preset(r, g, b))
+            b_btn.pack(side="left", expand=True, fill="x", padx=3)
+
+    def _create_wheel_image(self, size):
+        img = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
+        pixels = img.load()
+        cx = cy = size // 2
+        r = size // 2 - 3
+        for y in range(size):
+            for x in range(size):
+                dx, dy = x - cx, y - cy
+                d = math.hypot(dx, dy)
+                if d <= r:
+                    h = (math.atan2(dy, dx) / (2 * math.pi)) % 1.0
+                    s = min(1.0, d / r)
+                    rgb = colorsys.hsv_to_rgb(h, s, 1.0)
+                    pixels[x, y] = (int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255), 255)
+        return ImageTk.PhotoImage(img)
+
+    def _wclick(self, e):
+        WH = 160
+        cx = cy = WH // 2
+        r = WH // 2 - 3
+        dx, dy = e.x - cx, e.y - cy
+        d = min(math.hypot(dx, dy), r)
+        h = (math.atan2(dy, dx) / (2 * math.pi)) % 1.0
+        s = min(1.0, d / r)
+        rgb = colorsys.hsv_to_rgb(h, s, 1.0)
+        rv, gv, bv = int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+        self.r_var.set(rv); self.g_var.set(gv); self.b_var.set(bv)
+        self._upd_prev(rv, gv, bv)
+        mag = max(math.hypot(dx, dy), 1)
+        nx, ny = cx + dx / mag * d, cy + dy / mag * d
+        self.wc.coords(self.wm, nx - 5, ny - 5, nx + 5, ny + 5)
+        if self.live_color_var.get() and self.state.connected:
+            self._send_color()
+
+    def _on_rgb(self):
+        self._upd_prev(self.r_var.get(), self.g_var.get(), self.b_var.get())
+
+    def _upd_prev(self, r, g, b):
+        self.cur_color = (r, g, b)
+        hx = self._hex(r, g, b)
+        self.preview.config(bg=hx)
+        self.lbl_hex.config(text=hx)
+
+    # ── 2. VISTA DISCOTECA ────────────────────────────────────────────────
+    def _build_view_disco(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["disco"] = f
+
+        card = self._modern_card(f, "🎵  MODO DISCOTECA / MÚSICA EN VIVO")
+
+        tk.Label(card, text="Sincronización rítmica con el bombo y graves vía WASAPI Loopback (sin cables virtuales).\nColores neón saturados al 100% que evitan el efecto blanqueado.",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, justify="left").pack(anchor="w", padx=14, pady=(2, 12))
+
+        # Selector de estilo
+        row_st = tk.Frame(card, bg=BG_CARD)
+        row_st.pack(fill="x", padx=14, pady=6)
+        tk.Label(row_st, text="Estilo de iluminación:", font=("Segoe UI", 9, "bold"), fg=TXT, bg=BG_CARD).pack(side="left", padx=(0, 10))
+        self.music_style_cb = ttk.Combobox(row_st, values=list(self._music_style_map.keys()), state="readonly", font=("Segoe UI", 9))
         self.music_style_cb.current(0)
-        self.music_style_cb.pack(side="left",fill="x",expand=True)
-        self.music_style_cb.bind("<<ComboboxSelected>>",self._on_music_param_change)
+        self.music_style_cb.pack(side="left", fill="x", expand=True)
+        self.music_style_cb.bind("<<ComboboxSelected>>", self._on_music_param_change)
 
-        sr1=tk.Frame(inn,bg=CARD); sr1.pack(fill="x",pady=(4,2))
-        tk.Label(sr1,text="Sensibilidad al bombo:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
-        tk.Scale(sr1,from_=1,to=10,orient="horizontal",variable=self.music_sens_var,
-                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=MUSIC,
-                 highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:self._on_music_param_change()
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(sr1,textvariable=self.music_sens_var,fg=DIM,bg=CARD,font=("Courier New",8),width=3).pack(side="right")
+        # Slider Sensibilidad al bombo
+        sr1 = tk.Frame(card, bg=BG_CARD)
+        sr1.pack(fill="x", padx=14, pady=8)
+        tk.Label(sr1, text="Sensibilidad al bombo:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=20, anchor="w").pack(side="left")
+        tk.Scale(sr1, from_=1, to=10, orient="horizontal", variable=self.music_sens_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=MUSIC,
+                 highlightthickness=0, bd=0, sliderlength=14, command=lambda v: self._on_music_param_change()).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr1, textvariable=self.music_sens_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
 
-        sr2=tk.Frame(inn,bg=CARD); sr2.pack(fill="x",pady=(0,6))
-        tk.Label(sr2,text="Luz entre bombos:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
-        tk.Scale(sr2,from_=0,to=30,orient="horizontal",variable=self.music_dark_var,
-                 bg=CARD,fg=TXT,troughcolor=PANEL,activebackground=MUSIC,
-                 highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:self._on_music_param_change()
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(sr2,textvariable=self.music_dark_var,fg=DIM,bg=CARD,font=("Courier New",8),width=3).pack(side="right")
+        # Slider Luz entre bombos / Blackout
+        sr2 = tk.Frame(card, bg=BG_CARD)
+        sr2.pack(fill="x", padx=14, pady=8)
+        tk.Label(sr2, text="Luz de fondo (0% = oscuro):", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=20, anchor="w").pack(side="left")
+        tk.Scale(sr2, from_=0, to=30, orient="horizontal", variable=self.music_dark_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=MUSIC,
+                 highlightthickness=0, bd=0, sliderlength=14, command=lambda v: self._on_music_param_change()).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr2, textvariable=self.music_dark_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
 
-        pr=tk.Frame(inn,bg=CARD); pr.pack(fill="x",pady=(2,6))
-        tk.Label(pr,text="Color en vivo:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        self.music_preview=tk.Label(pr,text="         ",width=10,relief="flat",bg=CARD)
-        self.music_preview.pack(side="left",padx=6,ipady=4)
-        self.lbl_music=tk.Label(pr,text="",fg=DIM,bg=CARD,font=("Courier New",8))
+        # Previsualización del beat en vivo
+        prev_row = tk.Frame(card, bg=BG_CARD)
+        prev_row.pack(fill="x", padx=14, pady=12)
+        tk.Label(prev_row, text="Color actual del beat:", font=("Segoe UI", 9, "bold"), fg=DIM, bg=BG_CARD).pack(side="left")
+        self.music_preview = tk.Label(prev_row, text="         ", width=12, relief="flat", bg=BG_MAIN)
+        self.music_preview.pack(side="left", padx=10, ipady=4)
+        self.lbl_music = tk.Label(prev_row, text="", font=("Courier New", 9, "bold"), fg=DIM, bg=BG_CARD)
         self.lbl_music.pack(side="left")
 
-        self.btn_music=self._btn(inn,"🎵  Activar modo discoteca",self._toggle_music,MUSIC)
-        self.btn_music.pack(fill="x",ipady=6)
+        # Botón grande de activación
+        self.btn_music = tk.Button(card, text="🎵  Activar modo discoteca", font=("Segoe UI", 10, "bold"),
+                                   bg=MUSIC, fg="white", bd=0, relief="flat", cursor="hand2", pady=10,
+                                   activebackground="#e11d48", activeforeground="white", command=self._toggle_music)
+        self.btn_music.pack(fill="x", padx=14, pady=(6, 14))
 
-    def _build_screen(self,p):
-        inn=self._card(p,"🖥️  MODO PANTALLA (Ambilight)")
-        tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
-                 text="Los LEDs cambian con el color predominante de la pantalla.\n"
-                      "Requiere:  pip install mss numpy"
-                 ).pack(anchor="w",pady=(0,6))
-        mr=tk.Frame(inn,bg=CARD); mr.pack(fill="x",pady=(0,6))
-        tk.Label(mr,text="Monitor:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left",padx=(0,4))
-        self.mon_cb=ttk.Combobox(mr,textvariable=self.monitor_var,state="readonly",font=("Courier New",8))
-        self.mon_cb.pack(side="left",fill="x",expand=True,padx=(0,4))
-        self._btn(mr,"↺",self._refresh_monitors,PANEL,fg=DIM,font=("Helvetica",12)
-                  ).pack(side="left",ipadx=4,ipady=1)
-        self._refresh_monitors()
-        pr=tk.Frame(inn,bg=CARD); pr.pack(fill="x",pady=(0,6))
-        tk.Label(pr,text="Color actual:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        self.screen_preview=tk.Label(pr,text="         ",width=10,relief="flat",bg=CARD)
-        self.screen_preview.pack(side="left",padx=6,ipady=8)
-        self.lbl_screen_rgb=tk.Label(pr,text="",fg=DIM,bg=CARD,font=("Courier New",8))
-        self.lbl_screen_rgb.pack(side="left")
-        sr=tk.Frame(inn,bg=CARD); sr.pack(fill="x",pady=(0,6))
-        tk.Label(sr,text="Suavizado:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left")
-        tk.Scale(sr,from_=0.05,to=1.0,resolution=0.05,orient="horizontal",
-                 variable=self.smooth_screen,bg=CARD,fg=TXT,troughcolor=PANEL,
-                 activebackground=AMBIL,highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:setattr(self.state._worker,"SMOOTH",float(v))
-                                  if isinstance(self.state._worker,ScreenAnalyzer) else None
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        self.btn_screen=self._btn(inn,"🖥️  Activar modo pantalla",self._toggle_screen,AMBIL)
-        self.btn_screen.pack(fill="x",ipady=6)
+    # ── 3. VISTA CARÁTULA / ÁLBUM ─────────────────────────────────────────
+    def _build_view_album(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["album"] = f
 
-    def _build_album(self,p):
-        inn=self._card(p,"💿  MODO PORTADA (Álbum / Reproductor)")
-        tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
-                 text="Sincroniza los LEDs con la carátula de lo que escuchas (Spotify, YouTube, etc.).\n"
-                      "Requiere:  pip install winrt-Windows.Media.Control"
-                 ).pack(anchor="w",pady=(0,6))
-        mr=tk.Frame(inn,bg=CARD); mr.pack(fill="x",pady=(0,6))
-        tk.Label(mr,text="Modo de color:",fg=DIM,bg=CARD,font=("Helvetica",9)).pack(side="left",padx=(0,6))
-        self.album_method_cb=ttk.Combobox(mr,values=list(self._album_method_map.keys()),state="readonly",font=("Helvetica",8))
+        card = self._modern_card(f, "💿  MODO PORTADA (ÁLBUM / REPRODUCTOR)")
+
+        tk.Label(card, text="Detecta automáticamente lo que escuchas en Spotify, YouTube, Tidal, Apple Music, etc.\ny tiñe la habitación con el color característico del disco.",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, justify="left").pack(anchor="w", padx=14, pady=(2, 12))
+
+        # Fila de configuración de color
+        mr = tk.Frame(card, bg=BG_CARD)
+        mr.pack(fill="x", padx=14, pady=6)
+        tk.Label(mr, text="Algoritmo de color:", font=("Segoe UI", 9, "bold"), fg=TXT, bg=BG_CARD).pack(side="left", padx=(0, 10))
+        self.album_method_cb = ttk.Combobox(mr, values=list(self._album_method_map.keys()), state="readonly", font=("Segoe UI", 9))
         self.album_method_cb.current(0)
-        self.album_method_cb.pack(side="left",fill="x",expand=True)
-        self.album_method_cb.bind("<<ComboboxSelected>>",self._on_album_method_change)
+        self.album_method_cb.pack(side="left", fill="x", expand=True)
+        self.album_method_cb.bind("<<ComboboxSelected>>", self._on_album_method_change)
 
-        # Calibración óptica para LEDs: evitar color deslavado/blanco y deslumbramiento
-        sr1=tk.Frame(inn,bg=CARD); sr1.pack(fill="x",pady=(4,2))
-        tk.Label(sr1,text="Saturación (Color vivo):",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
-        tk.Scale(sr1,from_=1.0,to=2.5,resolution=0.1,orient="horizontal",
-                 variable=self.album_sat_var,bg=CARD,fg=TXT,troughcolor=PANEL,
-                 activebackground=MEDIA,highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:self._on_album_param_change()
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(sr1,textvariable=self.album_sat_var,fg=DIM,bg=CARD,font=("Courier New",8),width=4).pack(side="right")
+        # Calibración óptica para LEDs
+        sr1 = tk.Frame(card, bg=BG_CARD)
+        sr1.pack(fill="x", padx=14, pady=6)
+        tk.Label(sr1, text="Saturación LED (Color vivo):", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=22, anchor="w").pack(side="left")
+        tk.Scale(sr1, from_=1.0, to=2.5, resolution=0.1, orient="horizontal", variable=self.album_sat_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=MEDIA,
+                 highlightthickness=0, bd=0, sliderlength=14, command=lambda v: self._on_album_param_change()).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr1, textvariable=self.album_sat_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=4).pack(side="right")
 
-        sr2=tk.Frame(inn,bg=CARD); sr2.pack(fill="x",pady=(0,4))
-        tk.Label(sr2,text="Brillo de carátula:",fg=DIM,bg=CARD,font=("Helvetica",8)).pack(side="left")
-        tk.Scale(sr2,from_=30,to=100,resolution=5,orient="horizontal",
-                 variable=self.album_bri_var,bg=CARD,fg=TXT,troughcolor=PANEL,
-                 activebackground=MEDIA,highlightthickness=0,bd=0,sliderlength=14,
-                 command=lambda v:self._on_album_param_change()
-                 ).pack(side="left",fill="x",expand=True,padx=6)
-        tk.Label(sr2,textvariable=self.album_bri_var,fg=DIM,bg=CARD,font=("Courier New",8),width=4).pack(side="right")
+        sr2 = tk.Frame(card, bg=BG_CARD)
+        sr2.pack(fill="x", padx=14, pady=6)
+        tk.Label(sr2, text="Brillo de carátula:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=22, anchor="w").pack(side="left")
+        tk.Scale(sr2, from_=30, to=100, resolution=5, orient="horizontal", variable=self.album_bri_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=MEDIA,
+                 highlightthickness=0, bd=0, sliderlength=14, command=lambda v: self._on_album_param_change()).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr2, textvariable=self.album_bri_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=4).pack(side="right")
 
-        prev_row=tk.Frame(inn,bg=CARD); prev_row.pack(fill="x",pady=(4,8))
-        self.album_thumb_canvas=tk.Canvas(prev_row,width=50,height=50,bg=PANEL,highlightthickness=0)
-        self.album_thumb_canvas.pack(side="left",padx=(0,8))
+        # Muestra en vivo: Portada + Nombre canción + Color detectado
+        info_card = tk.Frame(card, bg=BG_MAIN, highlightthickness=1, highlightbackground=BORDER)
+        info_card.pack(fill="x", padx=14, pady=12)
 
-        info_col=tk.Frame(prev_row,bg=CARD); info_col.pack(side="left",fill="both",expand=True)
-        self.lbl_album_track=tk.Label(info_col,text="Sin reproducción activa",fg=TXT,bg=CARD,
-                                      font=("Helvetica",9,"bold"),anchor="w",justify="left")
+        self.album_thumb_canvas = tk.Canvas(info_card, width=54, height=54, bg=BG_CARD, highlightthickness=0)
+        self.album_thumb_canvas.pack(side="left", padx=8, pady=8)
+
+        text_box = tk.Frame(info_card, bg=BG_MAIN)
+        text_box.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+        self.lbl_album_track = tk.Label(text_box, text="Esperando reproducción de música...", font=("Segoe UI", 10, "bold"), fg=TXT, bg=BG_MAIN, anchor="w")
         self.lbl_album_track.pack(fill="x")
-        self.lbl_album_rgb=tk.Label(info_col,text="Esperando música...",fg=DIM,bg=CARD,
-                                    font=("Courier New",8),anchor="w")
+        self.lbl_album_rgb = tk.Label(text_box, text="Reproduce una canción en Spotify o YouTube", font=("Courier New", 9), fg=DIM, bg=BG_MAIN, anchor="w")
         self.lbl_album_rgb.pack(fill="x")
 
-        self.album_color_preview=tk.Label(prev_row,text="       ",width=8,relief="flat",bg=CARD)
-        self.album_color_preview.pack(side="right",padx=6,ipady=12)
+        self.album_color_preview = tk.Label(info_card, text="       ", width=10, relief="flat", bg=BG_CARD)
+        self.album_color_preview.pack(side="right", padx=12, ipady=12)
 
-        self.btn_album=self._btn(inn,"💿  Activar modo portada",self._toggle_album,MEDIA)
-        self.btn_album.pack(fill="x",ipady=6)
+        # Botón activar
+        self.btn_album = tk.Button(card, text="💿  Activar modo portada", font=("Segoe UI", 10, "bold"),
+                                   bg=MEDIA, fg="white", bd=0, relief="flat", cursor="hand2", pady=10,
+                                   activebackground="#9333ea", activeforeground="white", command=self._toggle_album)
+        self.btn_album.pack(fill="x", padx=14, pady=(4, 14))
 
-    def _build_settings(self,p):
-        inn=self._card(p,"⚙️  AJUSTES")
-        cf=tk.Frame(inn,bg=CARD); cf.pack(fill="x",pady=(0,8))
-        tk.Checkbutton(cf,text="Iniciar con Windows",variable=self.autostart_var,
-                       command=self._toggle_autostart,bg=CARD,fg=TXT,selectcolor=PANEL,
-                       activebackground=CARD,activeforeground=TXT,
-                       font=("Helvetica",10),cursor="hand2").pack(side="left")
-        self.lbl_auto=tk.Label(cf,text="",fg=DIM,bg=CARD,font=("Helvetica",8))
-        self.lbl_auto.pack(side="left",padx=(8,0))
-        tk.Label(inn,fg=DIM,bg=CARD,font=("Helvetica",8),justify="left",
-                 text="Al cerrar la ventana la app sigue en segundo plano (~15 MB).\n"
-                      "Haz clic en el icono de la bandeja para volver a abrirla.\n"
-                      "Requiere:  pip install pystray pillow"
-                 ).pack(anchor="w")
+    # ── 4. VISTA AMBILIGHT (PANTALLA) ─────────────────────────────────────
+    def _build_view_screen(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["screen"] = f
 
-    def _build_log(self,p):
-        tk.Label(p,text="REGISTRO",fg=DIM,bg=BG,font=("Helvetica",8,"bold")).pack(anchor="w",pady=(0,4))
-        lf=tk.Frame(p,bg=CARD); lf.pack(fill="both",expand=True)
-        self.log_txt=tk.Text(lf,bg=CARD,fg=DIM,font=("Courier New",8),wrap="word",
-                              bd=0,padx=6,pady=6,state="disabled",selectbackground=ACCENT)
-        sb=tk.Scrollbar(lf,command=self.log_txt.yview,bg=CARD)
+        card = self._modern_card(f, "🖥️  MODO PANTALLA (AMBILIGHT)")
+
+        tk.Label(card, text="Captura en tiempo real a alta velocidad el color predominante de la pantalla para sincronizar con juegos y películas.",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, justify="left").pack(anchor="w", padx=14, pady=(2, 12))
+
+        # Selector de monitor
+        mr = tk.Frame(card, bg=BG_CARD)
+        mr.pack(fill="x", padx=14, pady=6)
+        tk.Label(mr, text="Monitor a capturar:", font=("Segoe UI", 9, "bold"), fg=TXT, bg=BG_CARD).pack(side="left", padx=(0, 10))
+        self.mon_cb = ttk.Combobox(mr, textvariable=self.monitor_var, state="readonly", font=("Segoe UI", 9))
+        self.mon_cb.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        btn_ref = tk.Button(mr, text="↺", font=("Segoe UI", 10, "bold"), bg=BG_MAIN, fg=TXT, bd=0, relief="flat", cursor="hand2", padx=8, command=self._refresh_monitors)
+        btn_ref.pack(side="left")
+        self._refresh_monitors()
+
+        # Suavizado
+        sr = tk.Frame(card, bg=BG_CARD)
+        sr.pack(fill="x", padx=14, pady=8)
+        tk.Label(sr, text="Suavizado de transición:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=20, anchor="w").pack(side="left")
+        tk.Scale(sr, from_=0.05, to=1.0, resolution=0.05, orient="horizontal", variable=self.smooth_screen,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=AMBIL,
+                 highlightthickness=0, bd=0, sliderlength=14,
+                 command=lambda v: setattr(self.state._worker, "SMOOTH", float(v)) if isinstance(self.state._worker, ScreenAnalyzer) else None).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr, textvariable=self.smooth_screen, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=4).pack(side="right")
+
+        # Vista previa en vivo
+        pr = tk.Frame(card, bg=BG_CARD)
+        pr.pack(fill="x", padx=14, pady=12)
+        tk.Label(pr, text="Color promedio en pantalla:", font=("Segoe UI", 9, "bold"), fg=DIM, bg=BG_CARD).pack(side="left")
+        self.screen_preview = tk.Label(pr, text="         ", width=12, relief="flat", bg=BG_MAIN)
+        self.screen_preview.pack(side="left", padx=10, ipady=4)
+        self.lbl_screen_rgb = tk.Label(pr, text="", font=("Courier New", 9, "bold"), fg=DIM, bg=BG_CARD)
+        self.lbl_screen_rgb.pack(side="left")
+
+        # Botón
+        self.btn_screen = tk.Button(card, text="🖥️  Activar modo pantalla", font=("Segoe UI", 10, "bold"),
+                                    bg=AMBIL, fg="white", bd=0, relief="flat", cursor="hand2", pady=10,
+                                    activebackground="#0284c7", activeforeground="white", command=self._toggle_screen)
+        self.btn_screen.pack(fill="x", padx=14, pady=(6, 14))
+
+    # ── 5. VISTA EFECTOS ──────────────────────────────────────────────────
+    def _build_view_effects(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["effects"] = f
+
+        card = self._modern_card(f, "🌈  MODOS DINÁMICOS & EFECTOS")
+
+        tk.Label(card, text="Selecciona uno de los 20 modos integrados en el chip de la tira LED:",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD).pack(anchor="w", padx=14, pady=(2, 12))
+
+        row = tk.Frame(card, bg=BG_CARD)
+        row.pack(fill="x", padx=14, pady=6)
+        self.eff_cb = ttk.Combobox(row, textvariable=self.effect_var, state="readonly", values=list(EFFECTS.keys()), font=("Segoe UI", 10))
+        self.eff_cb.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        btn_apply = tk.Button(row, text="▶ Aplicar Efecto", font=("Segoe UI", 9, "bold"),
+                              bg=ACCENT2, fg="white", bd=0, relief="flat", cursor="hand2", padx=16, pady=6,
+                              activebackground="#db2777", activeforeground="white", command=self._send_effect)
+        btn_apply.pack(side="left")
+
+        sr = tk.Frame(card, bg=BG_CARD)
+        sr.pack(fill="x", padx=14, pady=14)
+        tk.Label(sr, text="Velocidad del efecto:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=18, anchor="w").pack(side="left")
+        tk.Scale(sr, from_=1, to=100, orient="horizontal", variable=self.speed_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=ACCENT2,
+                 highlightthickness=0, bd=0, sliderlength=14).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr, textvariable=self.speed_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
+
+    # ── 6. VISTA CONEXIÓN & AJUSTES ───────────────────────────────────────
+    def _build_view_settings(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["settings"] = f
+
+        # Tarjeta Conexión BLE
+        c_ble = self._modern_card(f, "🔗  DISPOSITIVO BLUETOOTH BLE")
+
+        r1 = tk.Frame(c_ble, bg=BG_CARD)
+        r1.pack(fill="x", padx=14, pady=(4, 8))
+        self.dev_cb = ttk.Combobox(r1, textvariable=self.dev_var, state="readonly", font=("Segoe UI", 9))
+        self.dev_cb.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        btn_scan = tk.Button(r1, text="🔍 Escanear Dispositivos", font=("Segoe UI", 9, "bold"),
+                             bg=ACCENT, fg="white", bd=0, relief="flat", cursor="hand2", padx=12, pady=6,
+                             activebackground="#4f46e5", activeforeground="white", command=self._do_scan)
+        btn_scan.pack(side="left")
+
+        r2 = tk.Frame(c_ble, bg=BG_CARD)
+        r2.pack(fill="x", padx=14, pady=(0, 14))
+        self.btn_con = tk.Button(r2, text="Conectar", font=("Segoe UI", 9, "bold"),
+                                 bg=OK, fg="white", bd=0, relief="flat", cursor="hand2", padx=16, pady=6,
+                                 activebackground="#16a34a", activeforeground="white", command=self._do_connect)
+        self.btn_con.pack(side="left", padx=(0, 8))
+        self.btn_dis = tk.Button(r2, text="Desconectar", font=("Segoe UI", 9, "bold"),
+                                 bg=ERR, fg="white", bd=0, relief="flat", cursor="hand2", padx=14, pady=6,
+                                 activebackground="#dc2626", activeforeground="white", command=self._do_disconnect)
+        self.btn_dis.pack(side="left")
+
+        # Tarjeta Ajustes de Sistema
+        c_sys = self._modern_card(f, "⚙️  OPCIONES DEL SISTEMA")
+        cf = tk.Frame(c_sys, bg=BG_CARD)
+        cf.pack(fill="x", padx=14, pady=(4, 8))
+        tk.Checkbutton(cf, text="Iniciar automáticamente con Windows", variable=self.autostart_var,
+                       command=self._toggle_autostart, bg=BG_CARD, fg=TXT, selectcolor=BG_MAIN,
+                       activebackground=BG_CARD, activeforeground=TXT, font=("Segoe UI", 9), cursor="hand2").pack(side="left")
+        self.lbl_auto = tk.Label(cf, text="", font=("Segoe UI", 8), bg=BG_CARD, fg=DIM)
+        self.lbl_auto.pack(side="left", padx=8)
+
+        tk.Label(c_sys, text="Al minimizar o cerrar la ventana, la aplicación se va a la bandeja del sistema\nliberando memoria RAM y continuando la reproducción en segundo plano.",
+                 font=("Segoe UI", 8), fg=DIM, bg=BG_CARD, justify="left").pack(anchor="w", padx=14, pady=(0, 14))
+
+    # ── 7. VISTA LOG / REGISTRO ───────────────────────────────────────────
+    def _build_view_log(self):
+        f = tk.Frame(self.content_area, bg=BG_MAIN)
+        self._views["log"] = f
+
+        card = self._modern_card(f, "📋  REGISTRO DE EVENTOS (LOG)")
+
+        lf = tk.Frame(card, bg=BG_MAIN)
+        lf.pack(fill="both", expand=True, padx=14, pady=(4, 8))
+
+        self.log_txt = tk.Text(lf, bg=BG_MAIN, fg=DIM, font=("Courier New", 9), wrap="word",
+                               bd=0, padx=8, pady=8, state="disabled", selectbackground=ACCENT)
+        sb = tk.Scrollbar(lf, command=self.log_txt.yview, bg=BG_CARD)
         self.log_txt.configure(yscrollcommand=sb.set)
-        sb.pack(side="right",fill="y"); self.log_txt.pack(fill="both",expand=True)
-        self._btn(p,"Limpiar log",self._clear_log,PANEL,fg=DIM).pack(fill="x",pady=(4,0),ipady=2)
+        sb.pack(side="right", fill="y")
+        self.log_txt.pack(fill="both", expand=True)
+
+        btn_clr = tk.Button(card, text="Limpiar Registro", font=("Segoe UI", 8, "bold"),
+                            bg=BG_CARD, fg=DIM, bd=0, relief="flat", cursor="hand2", padx=10, pady=4,
+                            activebackground=BORDER, activeforeground=TXT, command=self._clear_log)
+        btn_clr.pack(anchor="e", padx=14, pady=(0, 10))
+
+    # ── Helpers de diseño ────────────────────────────────────────────────
+    def _modern_card(self, parent, title):
+        card = tk.Frame(parent, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="x", pady=(0, 14))
+        if title:
+            h = tk.Frame(card, bg=BG_CARD)
+            h.pack(fill="x", padx=14, pady=(10, 4))
+            tk.Label(h, text=title, font=("Segoe UI", 9, "bold"), fg=TXT, bg=BG_CARD).pack(side="left")
+        return card
+
+    def _hex(self, r, g, b):
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _preset(self, r, g, b):
+        self.r_var.set(r); self.g_var.set(g); self.b_var.set(b)
+        self._upd_prev(r, g, b)
+        self._send_color()
 
     def _refresh_monitors(self):
-        mons=ScreenAnalyzer.list_monitors()
-        self.mon_cb["values"]=mons
-        self._monmap={m:i+1 for i,m in enumerate(mons)}
+        mons = ScreenAnalyzer.list_monitors()
+        self.mon_cb["values"] = mons
+        self._monmap = {m: i + 1 for i, m in enumerate(mons)}
         if mons: self.monitor_var.set(mons[0])
 
-    # ── acciones ─────────────────────────────────────────────────────────
-
+    # ── Acciones BLE / Modos ─────────────────────────────────────────────
     def _do_scan(self):
         if not BLEAK_OK: self.state._log("❌ pip install bleak"); return
-        self.dev_cb["values"]=[]; self.state.ble.scan()
+        self.dev_cb["values"] = []
+        self.state.ble.scan()
 
     def _do_connect(self):
         if not BLEAK_OK: return
-        sel=self.dev_var.get()
-        if not sel: messagebox.showwarning("Sin dispositivo","Escanea primero."); return
-        addr=sel.split("[")[-1].rstrip("]") if "[" in sel else sel
-        name=sel.split("[")[0].strip() if "[" in sel else addr
-        self.state.cfg["last_device"]={"address":addr,"name":name}
+        sel = self.dev_var.get()
+        if not sel: messagebox.showwarning("Sin dispositivo", "Escanea primero."); return
+        addr = sel.split("[")[-1].rstrip("]") if "[" in sel else sel
+        name = sel.split("[")[0].strip() if "[" in sel else addr
+        self.state.cfg["last_device"] = {"address": addr, "name": name}
         save_config(self.state.cfg)
         self.state.ble.connect(addr)
 
@@ -1168,176 +1382,186 @@ class AppWindow(tk.Tk):
         if self.state.ble: self.state.ble.disconnect()
 
     def _toggle_power(self):
-        self.state.power_on=not self.state.power_on
+        self.state.power_on = not self.state.power_on
         if self.state.power_on:
-            self.btn_pwr.config(text="⏻  ENCENDIDO",bg=OK)
+            self.btn_pwr.config(text="⏻ ENCENDIDO", bg=OK)
             self.state.send(cmd_on()); self.state._log("💡 Encendido")
         else:
-            self.btn_pwr.config(text="⏸  APAGADO",bg=ERR)
+            self.btn_pwr.config(text="⏻ APAGADO", bg=ERR)
             self.state.send(cmd_off()); self.state._log("🌑 Apagado")
 
-    def _on_bright(self,val):
-        p=int(val); self.lbl_br.config(text=f"{p}%"); self.state.send(cmd_brightness(p))
+    def _on_bright(self, val):
+        p = int(val)
+        self.lbl_br_num.config(text=f"{p}%")
+        self.state.send(cmd_brightness(p))
 
     def _send_color(self):
-        r,g,b=self.r_var.get(),self.g_var.get(),self.b_var.get()
-        self.state.send(cmd_color(r,g,b)); self.state._log(f"🎨 Color RGB({r},{g},{b})")
+        r, g, b = self.r_var.get(), self.g_var.get(), self.b_var.get()
+        self.state.send(cmd_color(r, g, b))
+        self.state._log(f"🎨 Color RGB({r},{g},{b})")
 
     def _send_effect(self):
         if not self.state.connected: self.state._log("⚠️  Conecta primero"); return
-        name=self.effect_var.get(); eid=EFFECTS.get(name)
-        if eid is None: self.state._log("ℹ️  Elige un efecto (no 'Sin efecto')"); return
-        spd=self.speed_var.get()
+        name = self.effect_var.get(); eid = EFFECTS.get(name)
+        if eid is None: self.state._log("ℹ️  Elige un efecto válido"); return
+        spd = self.speed_var.get()
         self.state.ble.send(cmd_speed(spd)); self.state.ble.send(cmd_effect(eid))
-        self.state._log(f"✨ Efecto {name}  id=0x{eid:02x}  vel={spd}")
+        self.state._log(f"✨ Efecto {name} id=0x{eid:02x} vel={spd}")
 
     def _toggle_music(self):
-        if self.state.active_mode=="music":
+        if self.state.active_mode == "music":
             self.state.stop_worker(); self._reset_mode_buttons()
             self.state._log("⏹  Modo discoteca desactivado"); return
         if not self.state.connected:
             self.state._log("⚠️  Conecta primero un dispositivo LED"); return
         self._reset_mode_buttons()
-        style_name=self.music_style_cb.get()
-        style=self._music_style_map.get(style_name,"club")
-        sens=self.music_sens_var.get()
-        dark=self.music_dark_var.get()
-        if self.state.start_music(style=style,sensitivity=sens,min_brightness=dark):
-            self.btn_music.config(text="⏹  Detener modo discoteca",bg=ERR)
+        style_name = self.music_style_cb.get()
+        style = self._music_style_map.get(style_name, "club")
+        sens = self.music_sens_var.get()
+        dark = self.music_dark_var.get()
+        if self.state.start_music(style=style, sensitivity=sens, min_brightness=dark):
+            self.btn_music.config(text="⏹  Detener modo discoteca", bg=ERR)
             self.state._log("🎵 Modo discoteca activo")
 
-    def _on_music_param_change(self,e=None):
-        if isinstance(self.state._worker,AudioAnalyzer):
-            style_name=self.music_style_cb.get()
-            style=self._music_style_map.get(style_name,"club")
-            sens=self.music_sens_var.get()
-            dark=self.music_dark_var.get()
-            self.state._worker.update_params(style=style,sensitivity=sens,min_brightness=dark)
+    def _on_music_param_change(self, e=None):
+        if isinstance(self.state._worker, AudioAnalyzer):
+            style_name = self.music_style_cb.get()
+            style = self._music_style_map.get(style_name, "club")
+            sens = self.music_sens_var.get()
+            dark = self.music_dark_var.get()
+            self.state._worker.update_params(style=style, sensitivity=sens, min_brightness=dark)
 
     def _toggle_screen(self):
-        if self.state.active_mode=="screen":
+        if self.state.active_mode == "screen":
             self.state.stop_worker(); self._reset_mode_buttons()
             self.state._log("⏹  Modo pantalla desactivado"); return
         if not self.state.connected:
             self.state._log("⚠️  Conecta primero un dispositivo LED"); return
         self._reset_mode_buttons()
-        mon_idx=self._monmap.get(self.monitor_var.get(),1)
+        mon_idx = self._monmap.get(self.monitor_var.get(), 1)
         if self.state.start_screen(mon_idx):
-            self.btn_screen.config(text="⏹  Detener modo pantalla",bg=ERR)
+            self.btn_screen.config(text="⏹  Detener modo pantalla", bg=ERR)
             self.state._log("🖥️  Modo pantalla activo")
 
     def _toggle_album(self):
-        if self.state.active_mode=="album":
+        if self.state.active_mode == "album":
             self.state.stop_worker(); self._reset_mode_buttons()
             self.state._log("⏹  Modo portada desactivado"); return
         if not self.state.connected:
             self.state._log("⚠️  Conecta primero un dispositivo LED"); return
         self._reset_mode_buttons()
-        method_name=self.album_method_cb.get()
-        method=self._album_method_map.get(method_name,"vibrant")
-        sat=self.album_sat_var.get()
-        bri=self.album_bri_var.get()/100.0
-        pure=self.album_pure_var.get()
-        if self.state.start_album(method=method,sat_boost=sat,bri_scale=bri,pure_color=pure):
-            self.btn_album.config(text="⏹  Detener modo portada",bg=ERR)
+        method_name = self.album_method_cb.get()
+        method = self._album_method_map.get(method_name, "vibrant")
+        sat = self.album_sat_var.get()
+        bri = self.album_bri_var.get() / 100.0
+        pure = self.album_pure_var.get()
+        if self.state.start_album(method=method, sat_boost=sat, bri_scale=bri, pure_color=pure):
+            self.btn_album.config(text="⏹  Detener modo portada", bg=ERR)
             self.state._log("💿 Modo portada activo")
 
-    def _on_album_param_change(self):
-        if isinstance(self.state._worker,AlbumCoverAnalyzer):
-            sat=self.album_sat_var.get()
-            bri=self.album_bri_var.get()/100.0
-            pure=self.album_pure_var.get()
-            self.state._worker.update_params(sat_boost=sat,bri_scale=bri,pure_color=pure)
-
-    def _on_album_method_change(self,e=None):
-        method_name=self.album_method_cb.get()
-        method=self._album_method_map.get(method_name,"vibrant")
-        if isinstance(self.state._worker,AlbumCoverAnalyzer):
+    def _on_album_method_change(self, e=None):
+        method_name = self.album_method_cb.get()
+        method = self._album_method_map.get(method_name, "vibrant")
+        if isinstance(self.state._worker, AlbumCoverAnalyzer):
             self.state._worker.set_method(method)
             self.state._log(f"💿 Método portada cambiado a: {method}")
 
-    def update_album_info(self,track_str,rgb,pil_img):
+    def _on_album_param_change(self):
+        if isinstance(self.state._worker, AlbumCoverAnalyzer):
+            sat = self.album_sat_var.get()
+            bri = self.album_bri_var.get() / 100.0
+            pure = self.album_pure_var.get()
+            self.state._worker.update_params(sat_boost=sat, bri_scale=bri, pure_color=pure)
+
+    def update_album_info(self, track_str, rgb, pil_img):
         try:
-            self.lbl_album_track.config(text=track_str[:38]+("..." if len(track_str)>38 else ""))
+            self.lbl_album_track.config(text=track_str[:42] + ("..." if len(track_str) > 42 else ""))
             self.lbl_album_rgb.config(text=f"Color RGB: ({rgb[0]}, {rgb[1]}, {rgb[2]})")
-            hex_c=f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+            hex_c = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
             self.album_color_preview.config(bg=hex_c)
             if pil_img and ImageTk:
-                thumb=pil_img.resize((50,50),PILImage.Resampling.LANCZOS)
-                self._album_tk_img=ImageTk.PhotoImage(thumb)
+                thumb = pil_img.resize((54, 54), PILImage.Resampling.LANCZOS)
+                self._album_tk_img = ImageTk.PhotoImage(thumb)
                 self.album_thumb_canvas.delete("all")
-                self.album_thumb_canvas.create_image(25,25,image=self._album_tk_img)
-        except Exception: pass
+                self.album_thumb_canvas.create_image(27, 27, image=self._album_tk_img)
+        except Exception:
+            pass
 
     def _reset_mode_buttons(self):
-        self.btn_music.config(text="🎵  Activar modo discoteca",bg=MUSIC)
-        self.btn_screen.config(text="🖥️  Activar modo pantalla",bg=AMBIL)
-        self.btn_album.config(text="💿  Activar modo portada",bg=MEDIA)
-        self.music_preview.config(bg=CARD); self.lbl_music.config(text="")
-        self.screen_preview.config(bg=CARD); self.lbl_screen_rgb.config(text="")
-        self.album_color_preview.config(bg=CARD)
+        self.btn_music.config(text="🎵  Activar modo discoteca", bg=MUSIC)
+        self.btn_screen.config(text="🖥️  Activar modo pantalla", bg=AMBIL)
+        self.btn_album.config(text="💿  Activar modo portada", bg=MEDIA)
+        self.music_preview.config(bg=BG_MAIN); self.lbl_music.config(text="")
+        self.screen_preview.config(bg=BG_MAIN); self.lbl_screen_rgb.config(text="")
+        self.album_color_preview.config(bg=BG_CARD)
 
     def _toggle_autostart(self):
-        ok=set_autostart(self.autostart_var.get())
+        ok = set_autostart(self.autostart_var.get())
         if ok:
-            estado="activado" if self.autostart_var.get() else "desactivado"
+            estado = "activado" if self.autostart_var.get() else "desactivado"
             self.lbl_auto.config(text=f"✅ {estado}")
         else:
             self.lbl_auto.config(text="❌ Error")
             self.autostart_var.set(not self.autostart_var.get())
 
-    # ── log ───────────────────────────────────────────────────────────────
-
-    def _append_log(self,msg):
+    def _append_log(self, msg):
         try:
             self.log_txt.config(state="normal")
-            self.log_txt.insert("end",msg+"\n")
+            self.log_txt.insert("end", msg + "\\n")
             self.log_txt.see("end")
             self.log_txt.config(state="disabled")
-        except Exception: pass
+        except Exception:
+            pass
 
     def _clear_log(self):
         self.state._log_buf.clear()
-        self.log_txt.config(state="normal"); self.log_txt.delete("1.0","end")
+        self.log_txt.config(state="normal")
+        self.log_txt.delete("1.0", "end")
         self.log_txt.config(state="disabled")
 
-    # ── callbacks BLE → UI ────────────────────────────────────────────────
-
-    def _on_status(self,s):
+    def _on_status(self, s):
         try:
-            if s=="scanning":    self.lbl_st.config(text="⬤  Escaneando...",fg=WARN)
-            elif s=="connecting":self.lbl_st.config(text="⬤  Conectando...",fg=WARN)
-            elif s=="connected":
-                self.lbl_st.config(text="⬤  Conectado",fg=OK)
-                self.btn_con.config(state="disabled"); self.btn_dis.config(state="normal")
+            if s == "connected":
+                self.lbl_st_dot.config(fg=OK)
+                self.lbl_st_text.config(text="Conectado", fg=OK)
+            elif s == "connecting":
+                self.lbl_st_dot.config(fg=WARN)
+                self.lbl_st_text.config(text="Conectando...", fg=WARN)
+            elif s == "scanning":
+                self.lbl_st_dot.config(fg=ACCENT)
+                self.lbl_st_text.config(text="Escaneando...", fg=ACCENT)
             else:
-                self.lbl_st.config(text="⬤  Desconectado",fg=ERR)
-                self.btn_con.config(state="normal"); self.btn_dis.config(state="disabled")
-        except Exception: pass
+                self.lbl_st_dot.config(fg=ERR)
+                self.lbl_st_text.config(text="Desconectado", fg=DIM)
+        except Exception:
+            pass
 
-    def _on_devices(self,devs):
+    def _on_devices(self, devs):
         try:
             if devs:
-                vals=[f"{n}  [{a}]" for n,a in devs]
-                self.dev_cb["values"]=vals; self.dev_var.set(vals[0])
-                self.state._log(f"📋 {len(devs)} dispositivo(s)")
+                vals = [f"{n} [{a}]" for n, a in devs]
+                self.dev_cb["values"] = vals
+                self.dev_var.set(vals[0])
+                self.state._log(f"📋 {len(devs)} dispositivo(s) encontrado(s)")
             else:
-                self.dev_cb["values"]=[]; self.dev_var.set("")
-        except Exception: pass
+                self.dev_cb["values"] = []
+                self.dev_var.set("")
+        except Exception:
+            pass
 
-    def update_reactive(self,r,g,b):
-        """Actualizar VU/preview desde el hilo de audio/pantalla."""
+    def update_reactive(self, r, g, b):
         try:
-            hx=self._hex(r,g,b)
-            if self.state.active_mode=="music":
+            if not self.winfo_viewable():
+                return
+            hx = self._hex(r, g, b)
+            if self.state.active_mode == "music":
                 self.music_preview.config(bg=hx)
-                self.lbl_music.config(text=f" RGB({r:3d},{g:3d},{b:3d})",
-                                       fg=hx if max(r,g,b)>25 else DIM)
-            elif self.state.active_mode=="screen":
+                self.lbl_music.config(text=f" RGB({r:3d},{g:3d},{b:3d})", fg=hx if max(r, g, b) > 25 else DIM)
+            elif self.state.active_mode == "screen":
                 self.screen_preview.config(bg=hx)
-                self.lbl_screen_rgb.config(text=f" RGB({r:3d},{g:3d},{b:3d})",
-                                            fg=hx if max(r,g,b)>20 else DIM)
-        except Exception: pass
+                self.lbl_screen_rgb.config(text=f" RGB({r:3d},{g:3d},{b:3d})", fg=hx if max(r, g, b) > 20 else DIM)
+        except Exception:
+            pass
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
@@ -1363,16 +1587,38 @@ def main():
 
     window_ref = [None]   # lista para poder mutar desde closures
 
+    def _restore_window(win):
+        try:
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.attributes("-topmost", False)
+        except Exception:
+            pass
+
     def open_window():
-        if window_ref[0] is not None:
-            try: window_ref[0].lift(); window_ref[0].focus_force(); return
-            except Exception: window_ref[0]=None
+        win = window_ref[0]
+        if win is not None:
+            try:
+                win.after(0, lambda: _restore_window(win))
+                return
+            except Exception:
+                window_ref[0] = None
+
         win = AppWindow(state, on_close_to_tray=lambda: None)
         window_ref[0] = win
         win.mainloop()
         window_ref[0] = None
 
     def tray_show(icon=None, item=None):
+        win = window_ref[0]
+        if win is not None:
+            try:
+                win.after(0, lambda: _restore_window(win))
+                return
+            except Exception:
+                window_ref[0] = None
         threading.Thread(target=open_window, daemon=True).start()
 
     def tray_power_on(icon=None, item=None):
@@ -1384,6 +1630,12 @@ def main():
     def tray_quit(icon=None, item=None):
         state.stop_worker()
         if state.ble: state.ble.disconnect()
+        win = window_ref[0]
+        if win is not None:
+            try:
+                win.after(0, win.destroy)
+            except Exception:
+                pass
         if tray_icon: tray_icon.stop()
 
     if TRAY_OK:
