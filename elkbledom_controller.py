@@ -138,6 +138,8 @@ class BLEEngine:
     def __init__(self, on_log, on_status, on_devices):
         self.on_log=on_log; self.on_status=on_status; self.on_devices=on_devices
         self.loop=asyncio.new_event_loop(); self.client=self.write_uuid=None
+        self._is_writing = False
+        self._pending_reactive = None
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
@@ -203,23 +205,56 @@ class BLEEngine:
         try: await self.client.write_gatt_char(self.write_uuid, data, response=False)
         except Exception as e: self.on_log(f"   ❌ BLE: {e}")
 
-    def send(self, data): self.submit(self._write(data))
+    def send(self, data):
+        """Comando directo del usuario: limpia cola reactiva previa y se ejecuta de inmediato."""
+        self._pending_reactive = None
+        self.submit(self._write(data))
+
+    def send_reactive(self, data):
+        """Envío de alta frecuencia (música/pantalla): descarta frames intermedios si el chip BLE
+        aún está escribiendo, garantizando CERO retraso y CERO acumulación de cola."""
+        def _enqueue():
+            if self._is_writing:
+                self._pending_reactive = data
+            else:
+                self._is_writing = True
+                asyncio.create_task(self._do_write_reactive(data))
+        try:
+            self.loop.call_soon_threadsafe(_enqueue)
+        except Exception:
+            pass
+
+    async def _do_write_reactive(self, data):
+        if not(self.client and self.client.is_connected and self.write_uuid):
+            self._is_writing = False
+            return
+        try:
+            await self.client.write_gatt_char(self.write_uuid, data, response=False)
+        except Exception as e:
+            self.on_log(f"   ❌ BLE: {e}")
+        finally:
+            if self._pending_reactive is not None:
+                next_data = self._pending_reactive
+                self._pending_reactive = None
+                await self._do_write_reactive(next_data)
+            else:
+                self._is_writing = False
 
 # ── Modo Música ───────────────────────────────────────────────────────────────
 
 # ── Paleta de discoteca ultra saturada (cero luz blanca) ─────────────────────
 
 DISCO_PALETTE = [
-    (255, 0, 75),    # Magenta Neón / Rosa eléctrico
+    (255, 0, 80),    # Magenta Neón / Rosa eléctrico
     (0, 240, 255),   # Cian láser
     (255, 230, 0),   # Amarillo eléctrico
     (150, 0, 255),   # Púrpura discoteca
-    (0, 255, 60),    # Verde neón
+    (0, 255, 65),    # Verde neón
     (255, 35, 0),    # Rojo fuego
-    (0, 90, 255),    # Azul cobalto
+    (0, 95, 255),    # Azul cobalto
     (255, 120, 0),   # Naranja láser
-    (0, 255, 180),   # Turquesa brillante
-    (255, 0, 190),   # Fucsia salvaje
+    (0, 255, 185),   # Turquesa brillante
+    (255, 0, 195),   # Fucsia salvaje
 ]
 
 class AudioAnalyzer:
@@ -233,7 +268,11 @@ class AudioAnalyzer:
         self.min_brightness = min_brightness / 100.0  # 0.0 a 0.30 (oscuridad de fondo)
         self._running       = False
         self._paused        = False
-        self._bass_avg      = 0.5
+
+        self._bass_avg      = 0.03
+        self._snare_avg     = 0.03
+        self._prev_bass     = 0.0
+        self._prev_snare    = 0.0
         self._last_beat_t   = 0.0
         self._cur_color     = DISCO_PALETTE[0]
         self._intensity     = 0.0
@@ -277,8 +316,9 @@ class AudioAnalyzer:
                             input=True, input_device_index=dev,
                             frames_per_buffer=self.CHUNK)
 
-            # Velocidad de decaimiento rítmico (~18% por buffer de 20ms)
-            decay = 0.82
+            # Decaimiento rítmico rápido y seco para máximo contraste en cada beat
+            decay = 0.80
+            win = np.hanning(self.CHUNK)
 
             while self._running:
                 if self._paused:
@@ -288,7 +328,6 @@ class AudioAnalyzer:
                 samples = np.frombuffer(raw, dtype=np.float32)
                 if ch > 1: samples = samples.reshape(-1, ch).mean(axis=1)
 
-                win = np.hanning(len(samples))
                 fft = np.abs(np.fft.rfft(samples * win))
                 freqs = np.fft.rfftfreq(len(samples), d=1.0 / sr)
 
@@ -296,25 +335,39 @@ class AudioAnalyzer:
                 m_bass = (freqs >= 30) & (freqs < 130)
                 bass = float(np.mean(fft[m_bass])) if m_bass.any() else 0.0
 
-                # Medios: 300 - 2200 Hz
-                m_mid = (freqs >= 300) & (freqs < 2200)
+                # Medios-graves / Caja / Palmada (Snare / Claps): 180 - 700 Hz
+                m_snare = (freqs >= 180) & (freqs < 700)
+                snare = float(np.mean(fft[m_snare])) if m_snare.any() else 0.0
+
+                # Medios / Voz: 700 - 2500 Hz
+                m_mid = (freqs >= 700) & (freqs < 2500)
                 mid = float(np.mean(fft[m_mid])) if m_mid.any() else 0.0
 
                 # Agudos / Hi-Hats: 2500 - 14000 Hz
                 m_high = (freqs >= 2500) & (freqs < 14000)
                 high = float(np.mean(fft[m_high])) if m_high.any() else 0.0
 
-                # Actualizar media adaptativa de graves
-                self._bass_avg = self._bass_avg * 0.95 + bass * 0.05
+                # Media móvil adaptativa lenta para que los picos sobresalgan siempre
+                self._bass_avg = self._bass_avg * 0.97 + bass * 0.03
+                self._snare_avg = self._snare_avg * 0.97 + snare * 0.03
+
+                # Ataque transitorio (punch inmediato del golpe)
+                attack_b = max(0.0, bass - self._prev_bass)
+                attack_s = max(0.0, snare - self._prev_snare)
+                self._prev_bass = bass
+                self._prev_snare = snare
+
                 now = time.time()
+                mult = 1.12 + (10 - self.sensitivity) * 0.08
+                thresh_b = max(0.005, self._bass_avg * mult)
+                thresh_s = max(0.005, self._snare_avg * mult)
+
+                # Detección de beat reactivo (bombo o caja)
+                is_kick = (bass > thresh_b or attack_b > thresh_b * 0.7) and (bass > 0.006)
+                is_snare = (snare > thresh_s or attack_s > thresh_s * 0.7) and (snare > 0.006)
+                is_beat = (is_kick or is_snare) and (now - self._last_beat_t > 0.11)
 
                 if self.style == "club":
-                    # Umbral adaptativo según sensibilidad (1 a 10)
-                    multiplier = 1.15 + (10 - self.sensitivity) * 0.12
-                    threshold = max(0.08, self._bass_avg * multiplier)
-
-                    # Detección de beat con bloqueo mínimo de 130ms entre bombos
-                    is_beat = (bass > threshold) and (now - self._last_beat_t > 0.13)
                     if is_beat:
                         self._last_beat_t = now
                         candidates = [c for c in DISCO_PALETTE if c != self._cur_color]
@@ -330,9 +383,7 @@ class AudioAnalyzer:
                     self.on_color(out_r, out_g, out_b)
 
                 elif self.style == "strobe":
-                    threshold = max(0.12, self._bass_avg * (1.2 + (10 - self.sensitivity) * 0.15))
-                    is_hit = (bass > threshold or high > threshold * 1.5) and (now - self._last_beat_t > 0.09)
-                    if is_hit:
+                    if is_beat:
                         self._last_beat_t = now
                         flash = random.choice(DISCO_PALETTE)
                         self.on_color(flash[0], flash[1], flash[2])
@@ -342,7 +393,7 @@ class AudioAnalyzer:
 
                 elif self.style == "pure_eq":
                     # Ecualizador puro: la banda dominante gana al 100% (evita luz blanca)
-                    b = bass ** 2.2
+                    b = (bass * 2.0) ** 2.2
                     m = (mid * 1.8) ** 2.2
                     h = (high * 2.2) ** 2.2
                     tot = b + m + h + 1e-9
@@ -356,7 +407,7 @@ class AudioAnalyzer:
                     else:
                         cur = (int(nb * 70), 0, 255)    # Azul / Púrpura de agudos
 
-                    vol = min(1.0, math.log1p(bass + mid + high) / math.log1p(3.0))
+                    vol = min(1.0, math.log1p(bass + mid + high) / math.log1p(2.5))
                     vol = max(self.min_brightness, vol)
                     self.on_color(int(cur[0] * vol), int(cur[1] * vol), int(cur[2] * vol))
 
@@ -652,6 +703,7 @@ class AppState:
         self._worker     = None
         self._last_sent  = (0,0,0)
         self._last_ts    = 0.0
+        self._last_gui_ts = 0.0
         self._log_buf    = []        # buffer de log mientras la ventana está cerrada
         self._log_cb     = None      # callback hacia la ventana cuando está abierta
         self._status_cb  = None
@@ -733,18 +785,28 @@ class AppState:
         pass
 
     def _on_reactive_color(self, r, g, b):
-        now=time.time()
-        if now-self._last_ts<0.06: return
-        self._last_ts=now
-        if not self.connected: return
-        pr,pg,pb=self._last_sent
-        if abs(r-pr)+abs(g-pg)+abs(b-pb)<5: return
-        self._last_sent=(r,g,b)
-        if self.ble: self.ble.send(cmd_color(r,g,b))
-        # notificar a la ventana si está abierta
-        if self.window:
-            try: self.window.after(0,lambda r=r,g=g,b=b: self.window.update_reactive(r,g,b))
-            except Exception: pass
+        now = time.time()
+        # Limitar tasa a ~25 FPS máximo (40ms) para no saturar el canal de radio BLE
+        if now - self._last_ts < 0.040:
+            return
+        self._last_ts = now
+        if not self.connected:
+            return
+        pr, pg, pb = self._last_sent
+        if abs(r - pr) + abs(g - pg) + abs(b - pb) < 4:
+            return
+        self._last_sent = (r, g, b)
+        if self.ble:
+            self.ble.send_reactive(cmd_color(r, g, b))
+
+        # Vista previa en la GUI throttled a ~12 FPS para que la ventana de Tkinter
+        # nunca se congele ni se quede pillada al mover sliders o cambiar opciones
+        if self.window and (now - self._last_gui_ts > 0.08):
+            self._last_gui_ts = now
+            try:
+                self.window.after(0, lambda r=r, g=g, b=b: self.window.update_reactive(r, g, b))
+            except Exception:
+                pass
 
     def send(self, data):
         if not self.ble or not self.connected: return
@@ -822,7 +884,7 @@ class AppWindow(tk.Tk):
         self.music_dark_var   = tk.IntVar(value=10)
         self._music_style_map = {
             "🎉 Club / Beat Jump (Salto de color con bombo)": "club",
-            "⚡ Strobe / Destellos ultrarrápidos": "strobe",
+            "⚡ Strobe / Destellos rápidos": "strobe",
             "🌊 Ecualizador Puro (Graves/Medios/Agudos)": "pure_eq"
         }
 
