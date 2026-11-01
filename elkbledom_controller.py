@@ -602,6 +602,88 @@ class AlbumCoverAnalyzer:
             return max(fallback, key=lambda x: x[0])[1]
         return (200, 200, 200)
 
+# ── Efectos de Software Dinámicos (Fuego/Vela, Respiración, RGB Fluido) ──────
+
+class SoftwareEffectsWorker:
+    def __init__(self, on_color, on_log, fx_type="fire", speed=50, color=(255, 100, 50)):
+        self.on_color   = on_color
+        self.on_log     = on_log
+        self.fx_type    = fx_type     # "fire" | "breathe" | "rainbow"
+        self.speed      = speed       # 1 a 100
+        self.base_color = color       # (r, g, b)
+        self._running   = False
+        self._paused    = False
+
+    def start(self):
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+        return True
+
+    def stop(self):  self._running = False
+    def pause(self): self._paused = True
+    def resume(self): self._paused = False
+
+    def update_params(self, fx_type=None, speed=None, color=None):
+        if fx_type is not None: self.fx_type = fx_type
+        if speed is not None: self.speed = int(speed)
+        if color is not None: self.base_color = color
+
+    def _loop(self):
+        import time, math, random, colorsys
+        t = 0.0
+        phase = 0.0
+        hue = 0.0
+        dt = 0.06  # ~16.6 FPS, perfectamente fluido y óptimo para Bluetooth
+
+        while self._running:
+            if self._paused:
+                time.sleep(0.1)
+                continue
+
+            # Escala de velocidad (1 a 100)
+            spd_factor = self.speed / 50.0
+
+            if self.fx_type == "fire":
+                # FUEGO / VELA / CHIMENEA
+                # Oscilaciones multiescala orgánicas combinadas con micro-jitter de aire
+                t += dt * spd_factor
+                slow = math.sin(t * 2.8) * 0.16
+                med  = math.sin(t * 7.1) * 0.10
+                fast = math.sin(t * 19.3) * 0.05
+                jitter = random.uniform(-0.06, 0.06)
+                intensity = max(0.35, min(1.0, 0.72 + slow + med + fast + jitter))
+
+                # Tono cálido dinámico: brasa profunda (0.02) a llama dorada (0.09)
+                flame_hue = 0.02 + 0.07 * (intensity ** 1.5)
+                r, g, b = colorsys.hsv_to_rgb(flame_hue, 1.0, intensity)
+                self.on_color(int(r * 255), int(g * 255), int(b * 255))
+
+            elif self.fx_type == "breathe":
+                # MODO RESPIRACIÓN (PULSO SUAVE)
+                # Ciclo sinusoidal continuo con curva gamma relajante
+                phase = (phase + dt * spd_factor * 1.8) % (2.0 * math.pi)
+                val = (1.0 - math.cos(phase)) / 2.0
+                curve = 0.05 + 0.95 * (val ** 1.8)
+
+                br, bg, bb = self.base_color
+                if max(br, bg, bb) < 30:
+                    br, bg, bb = (99, 102, 241)
+
+                out_r = int(br * curve)
+                out_g = int(bg * curve)
+                out_b = int(bb * curve)
+                self.on_color(out_r, out_g, out_b)
+
+            elif self.fx_type == "rainbow":
+                # RGB FLUIDO (RAINBOW DRIFT)
+                # Giro continuo de 360° por toda la rueda cromática HSV sin cortes
+                hue = (hue + dt * spd_factor * 0.07) % 1.0
+                r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                self.on_color(int(r * 255), int(g * 255), int(b * 255))
+
+            time.sleep(dt)
+
+
 # ── Icono bandeja ─────────────────────────────────────────────────────────────
 
 def _resource_path(filename):
@@ -721,6 +803,16 @@ class AppState:
             self._worker=w; self.active_mode="album"; return True
         return False
 
+    def start_custom_fx(self, fx_type="fire", speed=50, color=(255, 100, 50)):
+        self.stop_worker()
+        w = SoftwareEffectsWorker(self._on_reactive_color, self._log,
+                                  fx_type=fx_type, speed=speed, color=color)
+        if w.start():
+            self._worker = w
+            self.active_mode = "custom_fx"
+            return True
+        return False
+
     def _on_track_change(self, track_str, rgb, img):
         if self.window:
             try:
@@ -835,6 +927,15 @@ class AppWindow(tk.Tk):
             "📊 Dominante (Color mayoritario)": "dominant"
         }
 
+        # Variables Efectos de Software
+        self.custom_fx_var     = tk.StringVar(value="🕯️  Fuego / Vela (Chimenea)")
+        self.custom_fx_spd_var = tk.IntVar(value=50)
+        self._custom_fx_map    = {
+            "🕯️  Fuego / Vela (Chimenea)": "fire",
+            "🌬️  Modo Respiración (Pulso suave)": "breathe",
+            "🌈  RGB Fluido (Ciclo cromático 360°)": "rainbow"
+        }
+
         # Conectar callbacks del estado
         state._log_cb     = self._append_log
         state._status_cb  = self._on_status
@@ -856,6 +957,8 @@ class AppWindow(tk.Tk):
             self.btn_screen.config(text="⏹  Detener modo pantalla", bg=ERR)
         elif state.active_mode == "album":
             self.btn_album.config(text="⏹  Detener modo portada", bg=ERR)
+        elif state.active_mode == "custom_fx" and hasattr(self, "btn_custom_fx"):
+            self.btn_custom_fx.config(text="⏹  Detener efecto suave", bg=ERR)
 
         state.set_background(False)
 
@@ -1279,27 +1382,67 @@ class AppWindow(tk.Tk):
         f = tk.Frame(self.content_area, bg=BG_MAIN)
         self._views["effects"] = f
 
-        card = self._modern_card(f, "🌈  MODOS DINÁMICOS & EFECTOS")
+        # TARJETA 1: EFECTOS SUAVES POR SOFTWARE (Fluidos & Orgánicos)
+        c_soft = self._modern_card(f, "✨  EFECTOS SUAVES POR SOFTWARE (Fluidos & Orgánicos)")
 
-        tk.Label(card, text="Selecciona uno de los 20 modos integrados en el chip de la tira LED:",
-                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD).pack(anchor="w", padx=14, pady=(2, 12))
+        tk.Label(c_soft, text="Efectos continuos generados en tiempo real por la app para transiciones suaves,\nsin los saltos bruscos ni parpadeos feos del chip de fábrica.",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, justify="left").pack(anchor="w", padx=14, pady=(2, 10))
 
-        row = tk.Frame(card, bg=BG_CARD)
-        row.pack(fill="x", padx=14, pady=6)
-        self.eff_cb = ttk.Combobox(row, textvariable=self.effect_var, state="readonly", values=list(EFFECTS.keys()), font=("Segoe UI", 10))
+        # Selector de Efecto Suave
+        r_fx = tk.Frame(c_soft, bg=BG_CARD)
+        r_fx.pack(fill="x", padx=14, pady=6)
+        tk.Label(r_fx, text="Efecto:", font=("Segoe UI", 9, "bold"), fg=TXT, bg=BG_CARD).pack(side="left", padx=(0, 10))
+        self.custom_fx_cb = ttk.Combobox(r_fx, textvariable=self.custom_fx_var, state="readonly",
+                                         values=list(self._custom_fx_map.keys()), font=("Segoe UI", 9))
+        self.custom_fx_cb.pack(side="left", fill="x", expand=True)
+        self.custom_fx_cb.bind("<<ComboboxSelected>>", self._on_custom_fx_param_change)
+
+        # Slider Velocidad
+        sr_spd = tk.Frame(c_soft, bg=BG_CARD)
+        sr_spd.pack(fill="x", padx=14, pady=8)
+        tk.Label(sr_spd, text="Velocidad del efecto:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=18, anchor="w").pack(side="left")
+        tk.Scale(sr_spd, from_=1, to=100, orient="horizontal", variable=self.custom_fx_spd_var,
+                 bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, sliderlength=14, command=self._on_custom_fx_param_change).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Label(sr_spd, textvariable=self.custom_fx_spd_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
+
+        # Previsualización del color del efecto
+        prev_row = tk.Frame(c_soft, bg=BG_CARD)
+        prev_row.pack(fill="x", padx=14, pady=6)
+        tk.Label(prev_row, text="Color en vivo:", font=("Segoe UI", 9, "bold"), fg=DIM, bg=BG_CARD).pack(side="left")
+        self.custom_fx_preview = tk.Label(prev_row, text="         ", width=12, relief="flat", bg=BG_MAIN)
+        self.custom_fx_preview.pack(side="left", padx=10, ipady=4)
+        self.lbl_custom_fx_rgb = tk.Label(prev_row, text="", font=("Courier New", 9, "bold"), fg=DIM, bg=BG_CARD)
+        self.lbl_custom_fx_rgb.pack(side="left")
+
+        # Botón de activación
+        self.btn_custom_fx = tk.Button(c_soft, text="▶  Iniciar efecto suave", font=("Segoe UI", 10, "bold"),
+                                       bg=ACCENT, fg="white", bd=0, relief="flat", cursor="hand2", pady=8,
+                                       activebackground="#4f46e5", activeforeground="white", command=self._toggle_custom_fx)
+        self.btn_custom_fx.pack(fill="x", padx=14, pady=(8, 14))
+
+        # TARJETA 2: MODOS INTEGRADOS EN EL CHIP (HARDWARE)
+        c_hw = self._modern_card(f, "⚙️  MODOS INTEGRADOS EN EL CHIP (HARDWARE)")
+
+        tk.Label(c_hw, text="20 modos fijos almacenados en la memoria interna de la tira LED:",
+                 font=("Segoe UI", 9), fg=DIM, bg=BG_CARD).pack(anchor="w", padx=14, pady=(2, 10))
+
+        row_hw = tk.Frame(c_hw, bg=BG_CARD)
+        row_hw.pack(fill="x", padx=14, pady=6)
+        self.eff_cb = ttk.Combobox(row_hw, textvariable=self.effect_var, state="readonly", values=list(EFFECTS.keys()), font=("Segoe UI", 9))
         self.eff_cb.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        btn_apply = tk.Button(row, text="▶ Aplicar Efecto", font=("Segoe UI", 9, "bold"),
-                              bg=ACCENT2, fg="white", bd=0, relief="flat", cursor="hand2", padx=16, pady=6,
+        btn_apply = tk.Button(row_hw, text="▶ Aplicar", font=("Segoe UI", 9, "bold"),
+                              bg=ACCENT2, fg="white", bd=0, relief="flat", cursor="hand2", padx=16, pady=5,
                               activebackground="#db2777", activeforeground="white", command=self._send_effect)
         btn_apply.pack(side="left")
 
-        sr = tk.Frame(card, bg=BG_CARD)
-        sr.pack(fill="x", padx=14, pady=14)
-        tk.Label(sr, text="Velocidad del efecto:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=18, anchor="w").pack(side="left")
-        tk.Scale(sr, from_=1, to=100, orient="horizontal", variable=self.speed_var,
+        sr_hw = tk.Frame(c_hw, bg=BG_CARD)
+        sr_hw.pack(fill="x", padx=14, pady=(8, 14))
+        tk.Label(sr_hw, text="Velocidad del chip:", font=("Segoe UI", 9), fg=DIM, bg=BG_CARD, width=18, anchor="w").pack(side="left")
+        tk.Scale(sr_hw, from_=1, to=100, orient="horizontal", variable=self.speed_var,
                  bg=BG_CARD, fg=TXT, troughcolor=BG_MAIN, activebackground=ACCENT2,
                  highlightthickness=0, bd=0, sliderlength=14).pack(side="left", fill="x", expand=True, padx=6)
-        tk.Label(sr, textvariable=self.speed_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
+        tk.Label(sr_hw, textvariable=self.speed_var, font=("Courier New", 9, "bold"), fg=TXT, bg=BG_CARD, width=3).pack(side="right")
 
     # ── 6. VISTA CONEXIÓN & AJUSTES ───────────────────────────────────────
     def _build_view_settings(self):
@@ -1428,6 +1571,32 @@ class AppWindow(tk.Tk):
         self.state.send(cmd_color(r, g, b))
         self.state._log(f"🎨 Color RGB({r},{g},{b})")
 
+    def _toggle_custom_fx(self):
+        if self.state.active_mode == "custom_fx":
+            self.state.stop_worker()
+            self._reset_mode_buttons()
+            self.state._log("⏹  Efecto suave detenido")
+            return
+        if not self.state.connected:
+            self.state._log("⚠️  Conecta primero un dispositivo LED")
+            return
+        self._reset_mode_buttons()
+        fx_name = self.custom_fx_var.get()
+        fx_type = self._custom_fx_map.get(fx_name, "fire")
+        spd = self.custom_fx_spd_var.get()
+        col = self.cur_color
+        if self.state.start_custom_fx(fx_type=fx_type, speed=spd, color=col):
+            self.btn_custom_fx.config(text="⏹  Detener efecto suave", bg=ERR)
+            self.state._log(f"✨ Efecto suave {fx_name} activo (vel={spd})")
+
+    def _on_custom_fx_param_change(self, e=None):
+        if isinstance(self.state._worker, SoftwareEffectsWorker):
+            fx_name = self.custom_fx_var.get()
+            fx_type = self._custom_fx_map.get(fx_name, "fire")
+            spd = self.custom_fx_spd_var.get()
+            col = self.cur_color
+            self.state._worker.update_params(fx_type=fx_type, speed=spd, color=col)
+
     def _send_effect(self):
         if not self.state.connected: self.state._log("⚠️  Conecta primero"); return
         name = self.effect_var.get(); eid = EFFECTS.get(name)
@@ -1522,6 +1691,12 @@ class AppWindow(tk.Tk):
         self.music_preview.config(bg=BG_MAIN); self.lbl_music.config(text="")
         self.screen_preview.config(bg=BG_MAIN); self.lbl_screen_rgb.config(text="")
         self.album_color_preview.config(bg=BG_CARD)
+        if hasattr(self, "btn_custom_fx"):
+            self.btn_custom_fx.config(text="▶  Iniciar efecto suave", bg=ACCENT)
+        if hasattr(self, "custom_fx_preview"):
+            self.custom_fx_preview.config(bg=BG_MAIN)
+        if hasattr(self, "lbl_custom_fx_rgb"):
+            self.lbl_custom_fx_rgb.config(text="")
 
     def _toggle_autostart(self):
         ok = set_autostart(self.autostart_var.get())
@@ -1588,6 +1763,9 @@ class AppWindow(tk.Tk):
             elif self.state.active_mode == "screen":
                 self.screen_preview.config(bg=hx)
                 self.lbl_screen_rgb.config(text=f" RGB({r:3d},{g:3d},{b:3d})", fg=hx if max(r, g, b) > 20 else DIM)
+            elif self.state.active_mode == "custom_fx" and hasattr(self, "custom_fx_preview"):
+                self.custom_fx_preview.config(bg=hx)
+                self.lbl_custom_fx_rgb.config(text=f" RGB({r:3d},{g:3d},{b:3d})", fg=hx if max(r, g, b) > 20 else DIM)
         except Exception:
             pass
 
